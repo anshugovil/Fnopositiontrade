@@ -329,7 +329,7 @@ def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_p
                             st.session_state.prices[pos.underlying_ticker] = symbol_prices[pos.symbol]
             
             # Calculate final positions
-            self.calculate_final_positions()
+    self.calculate_final_positions()
             
             # Clean up temp file
             try:

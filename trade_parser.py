@@ -9,52 +9,40 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import re
 import logging
-import sys
-import os
-
-# Add the current directory to Python path to ensure imports work
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# Import from input_parser - try multiple approaches
-try:
-    from input_parser import Position, MONTH_CODE
-    logger.info("Successfully imported Position from input_parser")
-except ImportError as e:
-    logger.error(f"Failed to import from input_parser: {e}")
-    # As a fallback, define Position here if import fails
-    from dataclasses import dataclass
+# Define Position class locally to avoid import issues
+@dataclass
+class Position:
+    """Represents a single position"""
+    underlying_ticker: str
+    bloomberg_ticker: str
+    symbol: str
+    expiry_date: datetime
+    position_lots: float
+    security_type: str  # Futures, Call, Put
+    strike_price: float
+    lot_size: int
     
-    @dataclass
-    class Position:
-        """Represents a single position"""
-        underlying_ticker: str
-        bloomberg_ticker: str
-        symbol: str
-        expiry_date: datetime
-        position_lots: float
-        security_type: str  # Futures, Call, Put
-        strike_price: float
-        lot_size: int
-        
-        @property
-        def is_future(self) -> bool:
-            return self.security_type == 'Futures'
-        
-        @property
-        def is_call(self) -> bool:
-            return self.security_type == 'Call'
-        
-        @property
-        def is_put(self) -> bool:
-            return self.security_type == 'Put'
+    @property
+    def is_future(self) -> bool:
+        return self.security_type == 'Futures'
     
-    # Also define MONTH_CODE if not imported
-    MONTH_CODE = {
-        1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
-        7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
-    }
+    @property
+    def is_call(self) -> bool:
+        return self.security_type == 'Call'
+    
+    @property
+    def is_put(self) -> bool:
+        return self.security_type == 'Put'
+
+# Define MONTH_CODE locally as well
+MONTH_CODE = {
+    1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+    7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
+}
 
 
 class TradeParser:
@@ -140,19 +128,23 @@ class TradeParser:
     
     def parse_trade_file(self, file_path: str) -> List[Position]:
         """Parse trade file and convert to positions"""
-        # Read file
-        if file_path.endswith('.csv'):
-            df = pd.read_csv(file_path, header=None if self._has_no_header(file_path) else 0)
-        else:
-            df = pd.read_excel(file_path, header=None if self._has_no_header(file_path) else 0)
-        
-        # Detect format
-        self.format_type = self.detect_format(df)
-        
-        if self.format_type == 'MS':
-            return self._parse_ms_trades(df)
-        else:
-            return self._parse_gs_trades(df)
+        try:
+            # Read file
+            if file_path.endswith('.csv'):
+                df = pd.read_csv(file_path, header=None if self._has_no_header(file_path) else 0)
+            else:
+                df = pd.read_excel(file_path, header=None if self._has_no_header(file_path) else 0)
+            
+            # Detect format
+            self.format_type = self.detect_format(df)
+            
+            if self.format_type == 'MS':
+                return self._parse_ms_trades(df)
+            else:
+                return self._parse_gs_trades(df)
+        except Exception as e:
+            logger.error(f"Error in parse_trade_file: {e}")
+            return []
     
     def _has_no_header(self, file_path: str) -> bool:
         """Check if file has headers or not"""

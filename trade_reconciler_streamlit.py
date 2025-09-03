@@ -276,7 +276,7 @@ class TradeReconcilerApp:
         # Trade format selection
         trade_format = st.radio(
             "Select trade file format:",
-            ["WAFRA (MS Output)", "GS Format", "Direct Trade CSV"],
+            ["MS Raw Input (CSV)", "WAFRA Output (CSV)", "GS Format", "Direct Trade CSV"],
             help="Select the format of your trade file"
         )
         
@@ -300,7 +300,9 @@ class TradeReconcilerApp:
                                 temp_path = tmp.name
                             
                             # Parse trades based on format
-                            if trade_format == "WAFRA (MS Output)":
+                            if trade_format == "MS Raw Input (CSV)":
+                                trades = st.session_state.reconciler.parse_ms_raw_trade_file(temp_path)
+                            elif trade_format == "WAFRA Output (CSV)":
                                 trades = st.session_state.reconciler.parse_wafra_trade_file(temp_path)
                             elif trade_format == "Direct Trade CSV":
                                 trades = self.parse_direct_trade_csv(temp_path)
@@ -312,14 +314,46 @@ class TradeReconcilerApp:
                             
                             if trades:
                                 st.success(f"✅ Processed {len(trades)} trades")
+                                
+                                # Show summary
+                                st.markdown("### Trade Summary")
+                                
+                                # Count by type
+                                buy_count = sum(1 for t in trades if t.trade_type == 'BUY')
+                                sell_count = sum(1 for t in trades if t.trade_type == 'SELL')
+                                
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("Total Trades", len(trades))
+                                with col2:
+                                    st.metric("Buy Trades", buy_count)
+                                with col3:
+                                    st.metric("Sell Trades", sell_count)
+                                
+                                # Count by security type
+                                futures_count = sum(1 for t in trades if t.security_type == 'Futures')
+                                calls_count = sum(1 for t in trades if t.security_type == 'Call')
+                                puts_count = sum(1 for t in trades if t.security_type == 'Put')
+                                
+                                st.write(f"**By Type:** Futures: {futures_count}, Calls: {calls_count}, Puts: {puts_count}")
+                                
                             else:
                                 st.warning("⚠️ No valid trades found in file")
+                                st.info("""
+                                **For MS Raw Input files:**
+                                - Ensure file has at least 14 columns
+                                - Column 4: Instrument type (OPTSTK, FUTSTK, etc.)
+                                - Column 5: Symbol
+                                - Column 10: Side (B/S)
+                                - Column 12: Quantity
+                                """)
                             
                             # Clean up
                             os.unlink(temp_path)
                             
                         except Exception as e:
                             st.error(f"❌ Error processing trades: {str(e)}")
+                            st.exception(e)
             
             with col2:
                 st.markdown('<div class="info-box">', unsafe_allow_html=True)
@@ -333,28 +367,20 @@ class TradeReconcilerApp:
             
             st.subheader(f"📈 Processed Trades ({len(trades)} total)")
             
-            # Summary by transaction type
-            buy_trades = [t for t in trades if t.trade_type == 'BUY']
-            sell_trades = [t for t in trades if t.trade_type == 'SELL']
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Buy Trades", len(buy_trades))
-            with col2:
-                st.metric("Sell Trades", len(sell_trades))
-            
             # Convert to dataframe for display
             trades_data = []
             for t in trades:
                 trades_data.append({
                     'Underlying': t.underlying_ticker,
-                    'Symbol': t.bloomberg_ticker,
+                    'Symbol': t.symbol,
+                    'Bloomberg': t.bloomberg_ticker,
                     'Expiry': t.expiry_date.strftime('%Y-%m-%d'),
                     'Type': t.security_type,
                     'Strike': t.strike_price if t.strike_price > 0 else '',
                     'Trade': t.trade_type,
                     'Quantity': abs(t.position_change),
                     'Price': t.trade_price,
+                    'Lot Size': t.lot_size,
                     'Position Change': t.position_change
                 })
             
@@ -365,7 +391,7 @@ class TradeReconcilerApp:
             trade_summary = trades_df.groupby('Underlying').agg({
                 'Position Change': 'sum',
                 'Trade': 'count'
-            }).rename(columns={'Trade': 'Trade Count'})
+            }).rename(columns={'Trade': 'Trade Count', 'Position Change': 'Net Position Change'})
             
             st.dataframe(trade_summary, use_container_width=True)
             
@@ -462,25 +488,18 @@ class TradeReconcilerApp:
             
             changes_df = pd.DataFrame(changes_data)
             
-            # Style the dataframe
-            def style_change(val):
-                if val > 0:
-                    return 'color: green; font-weight: bold'
-                elif val < 0:
-                    return 'color: red; font-weight: bold'
-                return ''
-            
-            styled_df = changes_df.style.applymap(
-                style_change, 
-                subset=['Change', 'Change %']
-            ).format({
-                'Beginning': '{:,.0f}',
-                'Post-Trade': '{:,.0f}',
-                'Change': '{:+,.0f}',
-                'Change %': '{:+.1f}%'
-            })
-            
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            # Display with formatting
+            st.dataframe(
+                changes_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'Beginning': st.column_config.NumberColumn(format="%.0f"),
+                    'Post-Trade': st.column_config.NumberColumn(format="%.0f"),
+                    'Change': st.column_config.NumberColumn(format="%+.0f"),
+                    'Change %': st.column_config.NumberColumn(format="%+.1f%%")
+                }
+            )
             
             # Detailed reconciliation
             with st.expander("View Detailed Post-Trade Positions"):
@@ -641,7 +660,7 @@ class TradeReconcilerApp:
                             )
                             positions.append(pos)
                         
-                        # Create report using reconciler's method
+                        # Create report
                         st.session_state.reconciler._create_enhanced_report(
                             output_file,
                             st.session_state.beginning_positions,
@@ -697,13 +716,7 @@ class TradeReconcilerApp:
         try:
             df = pd.read_csv(file_path)
             trades = []
-            
-            # Expected columns: Symbol, Expiry, Type, Strike, Side, Quantity, Price
-            for _, row in df.iterrows():
-                # Create trade position
-                # This is a simplified parser - extend as needed
-                pass
-            
+            # Implement parsing logic for your direct trade CSV format
             return trades
         except Exception as e:
             logger.error(f"Error parsing direct trade CSV: {e}")

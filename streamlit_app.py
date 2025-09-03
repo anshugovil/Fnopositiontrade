@@ -12,21 +12,43 @@ import tempfile
 import os
 import logging
 from typing import Dict, List, Optional
-import yfinance as yf
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from copy import copy
+from dataclasses import dataclass
 
-# Import your modules
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Define Position class here to avoid import issues
+@dataclass
+class Position:
+    """Represents a single position"""
+    underlying_ticker: str
+    bloomberg_ticker: str
+    symbol: str
+    expiry_date: datetime
+    position_lots: float
+    security_type: str  # Futures, Call, Put
+    strike_price: float
+    lot_size: int
+    
+    @property
+    def is_future(self) -> bool:
+        return self.security_type == 'Futures'
+    
+    @property
+    def is_call(self) -> bool:
+        return self.security_type == 'Call'
+    
+    @property
+    def is_put(self) -> bool:
+        return self.security_type == 'Put'
+
+# Import modules
 from input_parser import InputParser
 from trade_parser import TradeParser
 from price_fetcher import PriceFetcher
 from excel_writer import ExcelWriter
 from recon_module import PositionReconciliation
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
@@ -65,13 +87,6 @@ st.markdown("""
         border-radius: 0.5rem;
         margin: 1rem 0;
         border: 1px solid #c3e6cb;
-    }
-    .recon-box {
-        background-color: #e7f3ff;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 1rem 0;
-        border: 1px solid #b3d9ff;
     }
     .trade-box {
         background-color: #fff3cd;
@@ -115,6 +130,10 @@ class StreamlitDeliveryApp:
             st.session_state.file_prefix = 'DELIVERY'
         if 'has_trades' not in st.session_state:
             st.session_state.has_trades = False
+        if 'trade_file' not in st.session_state:
+            st.session_state.trade_file = None
+        if 'trade_format' not in st.session_state:
+            st.session_state.trade_format = 'Auto-detect'
     
     def run(self):
         """Main application entry point"""
@@ -164,7 +183,6 @@ class StreamlitDeliveryApp:
             
             # Trade file upload section
             st.subheader("📈 Trade File (Optional)")
-            st.markdown('<div class="trade-box">', unsafe_allow_html=True)
             st.info("Upload a trade file to calculate final positions after trades")
             trade_file = st.file_uploader(
                 "Upload MS/GS trade file",
@@ -174,16 +192,8 @@ class StreamlitDeliveryApp:
             )
             
             if trade_file:
-                # Trade format selection
-                trade_format = st.radio(
-                    "Trade file format:",
-                    ["Auto-detect", "MS Format", "GS Format"],
-                    help="Select format or let system auto-detect"
-                )
                 st.success(f"✅ Trade file loaded: {trade_file.name}")
                 st.session_state.trade_file = trade_file
-                st.session_state.trade_format = trade_format
-            st.markdown('</div>', unsafe_allow_html=True)
             
             st.divider()
             
@@ -209,8 +219,7 @@ class StreamlitDeliveryApp:
         
         # Main content area with tabs
         tabs = st.tabs(["📤 Upload & Process", "📊 Positions Review", 
-                        "💼 Trade Positions", "💰 Deliverables Preview", 
-                        "🔄 Reconciliation", "📥 Download Reports"])
+                        "💼 Trade Positions", "📥 Download Reports"])
         
         with tabs[0]:
             self.upload_and_process_tab(mapping_file_path, usdinr_rate, fetch_prices)
@@ -222,12 +231,6 @@ class StreamlitDeliveryApp:
             self.trade_positions_tab()
         
         with tabs[3]:
-            self.deliverables_preview_tab()
-        
-        with tabs[4]:
-            self.reconciliation_tab()
-        
-        with tabs[5]:
             self.download_reports_tab()
     
     def upload_and_process_tab(self, mapping_file_path, usdinr_rate, fetch_prices):
@@ -257,19 +260,18 @@ class StreamlitDeliveryApp:
                 with st.spinner("Processing position file..."):
                     # Process position file
                     success, message = self.process_file(
-                        uploaded_file, mapping_file_path, None, usdinr_rate, fetch_prices
+                        uploaded_file, mapping_file_path, usdinr_rate, fetch_prices
                     )
                     
                     if success:
                         st.success(f"✅ {message}")
                         
                         # Process trade file if uploaded
-                        if hasattr(st.session_state, 'trade_file') and st.session_state.trade_file:
+                        if st.session_state.trade_file:
                             with st.spinner("Processing trade file..."):
                                 trade_success = self.process_trade_file(
                                     st.session_state.trade_file, 
                                     mapping_file_path,
-                                    getattr(st.session_state, 'trade_format', 'Auto-detect'),
                                     fetch_prices
                                 )
                                 if trade_success:
@@ -287,49 +289,40 @@ class StreamlitDeliveryApp:
                     else:
                         st.error(f"❌ {message}")
     
-def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_prices):
-    """Process the trade file"""
-    try:
-        # Save trade file temporarily
-        suffix = os.path.splitext(trade_file.name)[1]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, mode='wb') as tmp_file:
-            tmp_file.write(trade_file.getvalue())
-            trade_file_path = tmp_file.name
-        
-        # Parse trades - Add more detailed error handling here
+    def process_trade_file(self, trade_file, mapping_file_path, fetch_prices):
+        """Process the trade file"""
         try:
+            # Save trade file temporarily
+            suffix = os.path.splitext(trade_file.name)[1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, mode='wb') as tmp_file:
+                tmp_file.write(trade_file.getvalue())
+                trade_file_path = tmp_file.name
+            
+            # Parse trades
             trade_parser = TradeParser(mapping_file_path)
-            st.write("TradeParser initialized successfully")  # Debug line
-            
             trade_positions = trade_parser.parse_trade_file(trade_file_path)
-            st.write(f"Trade parsing returned: {len(trade_positions) if trade_positions else 0} positions")  # Debug line
             
-        except Exception as parse_error:
-            st.error(f"Error during trade parsing: {str(parse_error)}")
-            import traceback
-            st.error(traceback.format_exc())  # This will show the full error trace
-            return False
-        
-        if not trade_positions:
-            st.warning("No valid trade positions found in trade file")
-            return False
-        
-        st.session_state.trade_positions = trade_positions
+            if not trade_positions:
+                st.warning("No valid trade positions found in trade file")
+                return False
+            
+            st.session_state.trade_positions = trade_positions
             
             # Fetch additional prices if needed
-        if fetch_prices:
-                symbols_to_fetch = list(set(p.symbol for p in trade_positions 
-                                          if p.symbol not in st.session_state.prices))
+            if fetch_prices:
+                from price_fetcher import PriceFetcher
+                symbols_to_fetch = list(set(p.symbol for p in trade_positions))
                 if symbols_to_fetch:
                     price_fetcher = PriceFetcher()
                     symbol_prices = price_fetcher.fetch_prices_for_symbols(symbols_to_fetch)
                     
                     for pos in trade_positions:
                         if pos.symbol in symbol_prices:
-                            st.session_state.prices[pos.underlying_ticker] = symbol_prices[pos.symbol]
+                            if pos.underlying_ticker not in st.session_state.prices:
+                                st.session_state.prices[pos.underlying_ticker] = symbol_prices[pos.symbol]
             
             # Calculate final positions
-    self.calculate_final_positions()
+            self.calculate_final_positions()
             
             # Clean up temp file
             try:
@@ -342,6 +335,8 @@ def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_p
         except Exception as e:
             logger.error(f"Error processing trade file: {str(e)}")
             st.error(f"Error processing trade file: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
             return False
     
     def calculate_final_positions(self):
@@ -422,7 +417,7 @@ def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_p
             logger.error(f"Error generating report: {str(e)}")
             st.error(f"Error generating report: {str(e)}")
     
-    def process_file(self, uploaded_file, mapping_file_path, password, usdinr_rate, fetch_prices):
+    def process_file(self, uploaded_file, mapping_file_path, usdinr_rate, fetch_prices):
         """Process the uploaded position file"""
         try:
             # Save uploaded file temporarily
@@ -453,6 +448,7 @@ def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_p
             # Fetch prices if enabled
             if fetch_prices:
                 with st.spinner("Fetching prices from Yahoo Finance..."):
+                    from price_fetcher import PriceFetcher
                     price_fetcher = PriceFetcher()
                     symbols_to_fetch = list(set(p.symbol for p in positions))
                     symbol_prices = price_fetcher.fetch_prices_for_symbols(symbols_to_fetch)
@@ -564,42 +560,13 @@ def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_p
                 'Lot Size': p.lot_size
             })
         
-        df = pd.DataFrame(df_data)
-        
-        # Display table with color coding
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                'Strike': st.column_config.NumberColumn(format="%.2f"),
-                'Position (Lots)': st.column_config.NumberColumn(format="%.2f"),
-            }
-        )
-        
-        # Final positions preview
-        if st.session_state.final_positions:
-            st.divider()
-            st.subheader("📊 Final Positions (Start + Trades)")
-            
-            final_df_data = []
-            for p in st.session_state.final_positions:
-                final_df_data.append({
-                    'Underlying': p.underlying_ticker,
-                    'Symbol': p.symbol,
-                    'Expiry': p.expiry_date.strftime('%Y-%m-%d'),
-                    'Type': p.security_type,
-                    'Strike': p.strike_price if p.strike_price > 0 else '',
-                    'Final Position': p.position_lots,
-                    'Status': 'CLOSED' if p.position_lots == 0 else 'OPEN'
-                })
-            
-            final_df = pd.DataFrame(final_df_data)
-            st.dataframe(final_df, use_container_width=True, hide_index=True)
+        if df_data:
+            df = pd.DataFrame(df_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
     
     def positions_review_tab(self):
         """Display parsed positions for review"""
-        st.markdown('<h2 class="sub-header">Initial Position Summary</h2>', unsafe_allow_html=True)
+        st.markdown('<h2 class="sub-header">Position Summary</h2>', unsafe_allow_html=True)
         
         if not st.session_state.positions:
             st.info("📤 Please upload and process a position file first")
@@ -642,17 +609,9 @@ def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_p
                 'Lot Size': p.lot_size
             })
         
-        df = pd.DataFrame(df_data)
-        
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                'Strike': st.column_config.NumberColumn(format="%.2f"),
-                'Position (Lots)': st.column_config.NumberColumn(format="%.2f"),
-            }
-        )
+        if df_data:
+            df = pd.DataFrame(df_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
         
         # Unmapped symbols warning
         if st.session_state.unmapped_symbols:
@@ -660,212 +619,6 @@ def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_p
             with st.expander("View Unmapped Symbols"):
                 unmapped_df = pd.DataFrame(st.session_state.unmapped_symbols)
                 st.dataframe(unmapped_df, use_container_width=True, hide_index=True)
-    
-    def deliverables_preview_tab(self):
-        """Preview deliverables calculation"""
-        st.markdown('<h2 class="sub-header">Deliverables Analysis</h2>', unsafe_allow_html=True)
-        
-        if not st.session_state.positions:
-            st.info("📤 Please upload and process a position file first")
-            return
-        
-        # Choose which positions to analyze
-        if st.session_state.has_trades:
-            position_type = st.radio(
-                "Select positions to analyze:",
-                ["Initial Positions", "Final Positions (After Trades)"]
-            )
-            
-            if position_type == "Initial Positions":
-                positions = st.session_state.positions
-            else:
-                positions = st.session_state.final_positions
-        else:
-            positions = st.session_state.positions
-        
-        prices = st.session_state.prices
-        
-        # Group by underlying
-        grouped = {}
-        for p in positions:
-            if p.underlying_ticker not in grouped:
-                grouped[p.underlying_ticker] = []
-            grouped[p.underlying_ticker].append(p)
-        
-        # Sensitivity analysis
-        st.subheader("📈 Sensitivity Analysis")
-        sensitivity_pct = st.slider(
-            "Price Change %",
-            min_value=-20.0,
-            max_value=20.0,
-            value=0.0,
-            step=1.0,
-            help="Analyze deliverables at different price levels"
-        )
-        
-        # Calculate deliverables
-        deliverables_data = []
-        
-        for underlying in sorted(grouped.keys()):
-            underlying_positions = grouped[underlying]
-            spot_price = prices.get(underlying, 0)
-            
-            if spot_price:
-                adjusted_price = spot_price * (1 + sensitivity_pct / 100)
-            else:
-                adjusted_price = 0
-            
-            total_deliverable = 0
-            
-            for pos in underlying_positions:
-                if pos.security_type == 'Futures':
-                    deliverable = pos.position_lots
-                elif pos.security_type == 'Call':
-                    if adjusted_price > pos.strike_price:
-                        deliverable = pos.position_lots
-                    else:
-                        deliverable = 0
-                elif pos.security_type == 'Put':
-                    if adjusted_price < pos.strike_price:
-                        deliverable = -pos.position_lots
-                    else:
-                        deliverable = 0
-                else:
-                    deliverable = 0
-                
-                total_deliverable += deliverable
-            
-            deliverables_data.append({
-                'Underlying': underlying,
-                'Current Price': spot_price,
-                'Adjusted Price': adjusted_price if spot_price else 'N/A',
-                'Total Positions': len(underlying_positions),
-                'Net Deliverable (Lots)': total_deliverable
-            })
-        
-        # Display table
-        deliverables_df = pd.DataFrame(deliverables_data)
-        st.dataframe(
-            deliverables_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                'Current Price': st.column_config.NumberColumn(format="%.2f"),
-                'Adjusted Price': st.column_config.NumberColumn(format="%.2f"),
-                'Net Deliverable (Lots)': st.column_config.NumberColumn(format="%.0f"),
-            }
-        )
-    
-    def reconciliation_tab(self):
-        """Display reconciliation results"""
-        st.markdown('<h2 class="sub-header">Position Reconciliation</h2>', unsafe_allow_html=True)
-        
-        if not st.session_state.report_generated:
-            st.info("📤 Please process a position file first")
-            return
-        
-        if not st.session_state.recon_file:
-            st.markdown('<div class="recon-box">', unsafe_allow_html=True)
-            st.info("📋 Upload a reconciliation file in the sidebar to compare positions")
-            st.write("The recon file should have two columns:")
-            st.write("- Column A: Symbol (Bloomberg Ticker)")
-            st.write("- Column B: Position")
-            st.markdown('</div>', unsafe_allow_html=True)
-            return
-        
-        if not st.session_state.recon_results:
-            if st.button("🔄 Run Reconciliation", type="primary"):
-                with st.spinner("Performing reconciliation..."):
-                    self.perform_reconciliation()
-        
-        if st.session_state.recon_results:
-            results = st.session_state.recon_results
-            
-            # Check if we have dual reconciliation
-            if st.session_state.has_trades and 'final' in results:
-                # Dual reconciliation display
-                st.subheader("📊 Dual Reconciliation Summary")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.write("**Initial Positions Reconciliation:**")
-                    initial_summary = results['initial']['summary']
-                    st.metric("Total Discrepancies", initial_summary['total_discrepancies'])
-                    st.write(f"- Matched: {initial_summary['matched_count']}")
-                    st.write(f"- Mismatches: {initial_summary['mismatch_count']}")
-                    st.write(f"- Missing in Recon: {initial_summary['missing_in_recon_count']}")
-                    st.write(f"- Missing in Delivery: {initial_summary['missing_in_delivery_count']}")
-                
-                with col2:
-                    st.write("**Final Positions Reconciliation:**")
-                    final_summary = results['final']['summary']
-                    st.metric("Total Discrepancies", final_summary['total_discrepancies'])
-                    st.write(f"- Matched: {final_summary['matched_count']}")
-                    st.write(f"- Mismatches: {final_summary['mismatch_count']}")
-                    st.write(f"- Missing in Recon: {final_summary['missing_in_recon_count']}")
-                    st.write(f"- Missing in Delivery: {final_summary['missing_in_delivery_count']}")
-                
-                # Select which reconciliation to view in detail
-                recon_view = st.radio(
-                    "View detailed reconciliation:",
-                    ["Initial Positions", "Final Positions"]
-                )
-                
-                if recon_view == "Initial Positions":
-                    display_results = results['initial']
-                else:
-                    display_results = results['final']
-            else:
-                # Single reconciliation display
-                st.subheader("📊 Reconciliation Summary")
-                display_results = results['initial']
-                summary = display_results['summary']
-                
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.metric("Matched Positions", summary['matched_count'])
-                
-                with col2:
-                    st.metric("Position Mismatches", summary['mismatch_count'])
-                
-                with col3:
-                    st.metric("Missing in Recon", summary['missing_in_recon_count'])
-                
-                with col4:
-                    st.metric("Missing in Delivery", summary['missing_in_delivery_count'])
-                
-                # Show total discrepancies prominently
-                if summary['total_discrepancies'] > 0:
-                    st.error(f"⚠️ Total Discrepancies: {summary['total_discrepancies']}")
-                else:
-                    st.success("✅ All positions match perfectly!")
-            
-            # Display detailed discrepancies
-            if display_results['position_mismatches']:
-                st.subheader("🔍 Position Mismatches")
-                mismatch_df = pd.DataFrame(display_results['position_mismatches'])
-                st.dataframe(
-                    mismatch_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        'Delivery_Position': st.column_config.NumberColumn(format="%.2f"),
-                        'Recon_Position': st.column_config.NumberColumn(format="%.2f"),
-                        'Difference': st.column_config.NumberColumn(format="%.2f"),
-                    }
-                )
-            
-            if display_results['missing_in_recon']:
-                st.subheader("📋 Missing in Recon File")
-                missing_recon_df = pd.DataFrame(display_results['missing_in_recon'])
-                st.dataframe(missing_recon_df, use_container_width=True, hide_index=True)
-            
-            if display_results['missing_in_delivery']:
-                st.subheader("📋 Missing in Delivery Output")
-                missing_delivery_df = pd.DataFrame(display_results['missing_in_delivery'])
-                st.dataframe(missing_delivery_df, use_container_width=True, hide_index=True)
     
     def download_reports_tab(self):
         """Download generated reports"""

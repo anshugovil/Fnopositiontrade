@@ -203,7 +203,9 @@ class TradePositionReconciler:
         except Exception as e:
             logger.error(f"Error reading MS trade file: {e}")
             return []
-    
+
+    # [Continue with rest of methods - parse_wafra_trade_file, _parse_date_flexible, etc.]
+    # Due to length, I'll continue in next message if needed
     def parse_wafra_trade_file(self, trade_file_path: str) -> List[TradePosition]:
         """Parse WAFRA format trade file and convert to position changes"""
         trade_positions = []
@@ -512,17 +514,16 @@ class TradePositionReconciler:
         # Convert back to DataFrame
         post_trade_data = []
         for key, pos in position_dict.items():
-            # Only include non-zero positions
-            if pos['position'] != 0:
-                post_trade_data.append({
-                    'Underlying': pos['underlying'],
-                    'Symbol': pos['symbol'],
-                    'Expiry': pos['expiry'].strftime('%Y-%m-%d'),
-                    'Position': pos['position'],
-                    'Type': pos['type'],
-                    'Strike': pos['strike'] if pos['strike'] > 0 else '',
-                    'Lot Size': pos['lot_size']
-                })
+            # Include all positions (even zeros if needed)
+            post_trade_data.append({
+                'Underlying': pos['underlying'],
+                'Symbol': pos['symbol'],
+                'Expiry': pos['expiry'].strftime('%Y-%m-%d'),
+                'Position': pos['position'],
+                'Type': pos['type'],
+                'Strike': pos['strike'] if pos['strike'] > 0 else '',
+                'Lot Size': pos['lot_size']
+            })
         
         post_trade_df = pd.DataFrame(post_trade_data)
         
@@ -534,8 +535,7 @@ class TradePositionReconciler:
             )
         
         return post_trade_df
-    
-    def generate_post_trade_report(self, beginning_file: str, trade_file: str, 
+                             def generate_post_trade_report(self, beginning_file: str, trade_file: str, 
                                   output_file: str, trade_format: str = 'MS'):
         """Main method to generate complete post-trade report"""
         
@@ -573,23 +573,33 @@ class TradePositionReconciler:
         # Step 4: Convert to Position objects for report generation
         positions = []
         for _, row in post_trade_df.iterrows():
-            pos = Position(
-                underlying_ticker=row['Underlying'],
-                bloomberg_ticker=row['Symbol'],
-                symbol=row['Symbol'].split()[0],
-                expiry_date=pd.to_datetime(row['Expiry']),
-                position_lots=row['Position'],
-                security_type=row['Type'],
-                strike_price=float(row['Strike']) if row['Strike'] else 0,
-                lot_size=row['Lot Size']
-            )
-            positions.append(pos)
+            # Only add non-zero positions for report
+            if row['Position'] != 0:
+                pos = Position(
+                    underlying_ticker=row['Underlying'],
+                    bloomberg_ticker=row['Symbol'],
+                    symbol=row['Symbol'].split()[0] if ' ' in str(row['Symbol']) else row['Symbol'],
+                    expiry_date=pd.to_datetime(row['Expiry']),
+                    position_lots=row['Position'],
+                    security_type=row['Type'],
+                    strike_price=float(row['Strike']) if row['Strike'] else 0,
+                    lot_size=row['Lot Size']
+                )
+                positions.append(pos)
         
         # Step 5: Fetch prices
         logger.info("Fetching current prices...")
         price_fetcher = PriceFetcher()
-        symbols_to_fetch = list(set(p.symbol for p in positions))
-        prices = price_fetcher.fetch_prices_for_symbols(symbols_to_fetch)
+        
+        # Get symbols from both pre and post positions
+        all_symbols = set()
+        for _, row in beginning_df.iterrows():
+            symbol = str(row['Symbol']).split()[0] if ' ' in str(row['Symbol']) else row['Symbol']
+            all_symbols.add(symbol)
+        for p in positions:
+            all_symbols.add(p.symbol)
+        
+        prices = price_fetcher.fetch_prices_for_symbols(list(all_symbols))
         
         # Step 6: Create enhanced Excel report
         logger.info("Creating post-trade Excel report...")
@@ -608,9 +618,13 @@ class TradePositionReconciler:
                                prices: Dict[str, float]):
         """Create Excel report with complete pre and post trade positions"""
         
-        # Create the Excel writer
+        # Create writer and use its workbook
         writer = ExcelWriter(output_file, self.usdinr_rate)
         wb = writer.wb
+        
+        # Remove default sheet if exists
+        if 'Sheet' in wb.sheetnames:
+            wb.remove(wb['Sheet'])
         
         # Define styles
         header_font = Font(bold=True, size=11)
@@ -635,10 +649,10 @@ class TradePositionReconciler:
         ws_summary.cell(5, 1).fill = summary_header_fill
         
         summary_data = [
-            ("Beginning Positions Count", len(beginning_df)),
+            ("Pre-Trade Positions Count", len(beginning_df)),
             ("Trades Executed", len(trade_positions)),
-            ("Post-Trade Positions Count", len(post_trade_df)),
-            ("Net New Positions", len(post_trade_df) - len(beginning_df))
+            ("Post-Trade Positions Count", len([r for _, r in post_trade_df.iterrows() if r['Position'] != 0])),
+            ("Net New Positions", len([r for _, r in post_trade_df.iterrows() if r['Position'] != 0]) - len(beginning_df))
         ]
         
         row = 6
@@ -746,14 +760,14 @@ class TradePositionReconciler:
         ws_trades.column_dimensions['J'].width = 10
         ws_trades.column_dimensions['K'].width = 10
         
-        # ============= 3. PRE-TRADE POSITIONS =============
+        # ============= 3. PRE-TRADE SHEETS =============
         # Convert beginning positions to Position objects
         pre_positions = []
         for _, row in beginning_df.iterrows():
             pos = Position(
                 underlying_ticker=row['Underlying'],
                 bloomberg_ticker=row['Symbol'],
-                symbol=row['Symbol'].split()[0] if ' ' in row['Symbol'] else row['Symbol'],
+                symbol=str(row['Symbol']).split()[0] if ' ' in str(row['Symbol']) else row['Symbol'],
                 expiry_date=pd.to_datetime(row['Expiry']),
                 position_lots=float(row['Position']),
                 security_type=row['Type'],
@@ -762,292 +776,75 @@ class TradePositionReconciler:
             )
             pre_positions.append(pos)
         
-        # 3a. Pre-Trade All Positions
+        # Pre-Trade All Positions
         ws_pre_all = wb.create_sheet("PreTrade_All_Positions")
         self._write_positions_sheet(ws_pre_all, beginning_df, header_font, header_fill, border)
         
-        # 3b. Pre-Trade Master Deliverables
-        ws_pre_master = wb.create_sheet("PreTrade_Master_All_Expiries")
-        self._write_deliverable_sheet(ws_pre_master, pre_positions, prices, "PRE-TRADE", writer)
+        # Use ExcelWriter methods for deliverable and IV sheets
+        # Pre-Trade Master
+        writer.write_master_sheet(pre_positions, prices)
+        # Rename the sheet
+        if "Master_All_Expiries" in wb.sheetnames:
+            wb["Master_All_Expiries"].title = "PreTrade_Master_All_Expiries"
         
-        # 3c. Pre-Trade Expiry-wise Deliverables
+        # Pre-Trade Expiry sheets
         pre_expiries = list(set(p.expiry_date for p in pre_positions))
         for expiry in sorted(pre_expiries):
-            sheet_name = f"PreTrade_Expiry_{expiry.strftime('%Y_%m_%d')}"
-            ws_pre_exp = wb.create_sheet(sheet_name)
-            expiry_positions = [p for p in pre_positions if p.expiry_date.date() == expiry.date()]
-            self._write_deliverable_sheet(ws_pre_exp, expiry_positions, prices, f"PRE-TRADE {expiry.strftime('%Y-%m-%d')}", writer)
+            writer.write_expiry_sheet(expiry, pre_positions, prices)
+            # Rename the sheet
+            old_name = f"Expiry_{expiry.strftime('%Y_%m_%d')}"
+            new_name = f"PreTrade_Expiry_{expiry.strftime('%Y_%m_%d')}"
+            if old_name in wb.sheetnames:
+                wb[old_name].title = new_name
         
-        # 3d. Pre-Trade IV Master
-        ws_pre_iv_master = wb.create_sheet("PreTrade_IV_All_Expiries")
-        self._write_iv_sheet(ws_pre_iv_master, pre_positions, prices, "PRE-TRADE", writer)
+        # Pre-Trade IV sheets
+        writer.write_iv_master_sheet(pre_positions, prices)
+        if "IV_All_Expiries" in wb.sheetnames:
+            wb["IV_All_Expiries"].title = "PreTrade_IV_All_Expiries"
         
-        # 3e. Pre-Trade IV Expiry-wise
         for expiry in sorted(pre_expiries):
-            sheet_name = f"PreTrade_IV_{expiry.strftime('%Y_%m_%d')}"
-            ws_pre_iv_exp = wb.create_sheet(sheet_name)
-            expiry_positions = [p for p in pre_positions if p.expiry_date.date() == expiry.date()]
-            self._write_iv_sheet(ws_pre_iv_exp, expiry_positions, prices, f"PRE-TRADE IV {expiry.strftime('%Y-%m-%d')}", writer)
+            writer.write_iv_expiry_sheet(expiry, pre_positions, prices)
+            old_name = f"IV_Expiry_{expiry.strftime('%Y_%m_%d')}"
+            new_name = f"PreTrade_IV_{expiry.strftime('%Y_%m_%d')}"
+            if old_name in wb.sheetnames:
+                wb[old_name].title = new_name
         
-        # ============= 4. POST-TRADE POSITIONS =============
-        # 4a. Post-Trade All Positions
+        # ============= 4. POST-TRADE SHEETS =============
+        # Post-Trade All Positions
         ws_post_all = wb.create_sheet("PostTrade_All_Positions")
-        self._write_positions_sheet(ws_post_all, post_trade_df, header_font, header_fill, border)
+        # Filter only non-zero positions for post-trade
+        post_trade_non_zero = post_trade_df[post_trade_df['Position'] != 0].copy()
+        self._write_positions_sheet(ws_post_all, post_trade_non_zero, header_font, header_fill, border)
         
-        # 4b. Post-Trade Master Deliverables
-        ws_post_master = wb.create_sheet("PostTrade_Master_All_Expiries")
-        self._write_deliverable_sheet(ws_post_master, positions, prices, "POST-TRADE", writer)
+        # Post-Trade Master
+        writer.write_master_sheet(positions, prices)
+        if "Master_All_Expiries" in wb.sheetnames:
+            wb["Master_All_Expiries"].title = "PostTrade_Master_All_Expiries"
         
-        # 4c. Post-Trade Expiry-wise Deliverables
+        # Post-Trade Expiry sheets
         post_expiries = list(set(p.expiry_date for p in positions))
         for expiry in sorted(post_expiries):
-            sheet_name = f"PostTrade_Expiry_{expiry.strftime('%Y_%m_%d')}"
-            ws_post_exp = wb.create_sheet(sheet_name)
-            expiry_positions = [p for p in positions if p.expiry_date.date() == expiry.date()]
-            self._write_deliverable_sheet(ws_post_exp, expiry_positions, prices, f"POST-TRADE {expiry.strftime('%Y-%m-%d')}", writer)
+            writer.write_expiry_sheet(expiry, positions, prices)
+            old_name = f"Expiry_{expiry.strftime('%Y_%m_%d')}"
+            new_name = f"PostTrade_Expiry_{expiry.strftime('%Y_%m_%d')}"
+            if old_name in wb.sheetnames:
+                wb[old_name].title = new_name
         
-        # 4d. Post-Trade IV Master
-        ws_post_iv_master = wb.create_sheet("PostTrade_IV_All_Expiries")
-        self._write_iv_sheet(ws_post_iv_master, positions, prices, "POST-TRADE", writer)
+        # Post-Trade IV sheets
+        writer.write_iv_master_sheet(positions, prices)
+        if "IV_All_Expiries" in wb.sheetnames:
+            wb["IV_All_Expiries"].title = "PostTrade_IV_All_Expiries"
         
-        # 4e. Post-Trade IV Expiry-wise
         for expiry in sorted(post_expiries):
-            sheet_name = f"PostTrade_IV_{expiry.strftime('%Y_%m_%d')}"
-            ws_post_iv_exp = wb.create_sheet(sheet_name)
-            expiry_positions = [p for p in positions if p.expiry_date.date() == expiry.date()]
-            self._write_iv_sheet(ws_post_iv_exp, expiry_positions, prices, f"POST-TRADE IV {expiry.strftime('%Y-%m-%d')}", writer)
+            writer.write_iv_expiry_sheet(expiry, positions, prices)
+            old_name = f"IV_Expiry_{expiry.strftime('%Y_%m_%d')}"
+            new_name = f"PostTrade_IV_{expiry.strftime('%Y_%m_%d')}"
+            if old_name in wb.sheetnames:
+                wb[old_name].title = new_name
         
         # Save the workbook
         wb.save(output_file)
         logger.info(f"Enhanced report saved with pre-trade and post-trade sheets: {output_file}")
-    
-    def _write_deliverable_sheet(self, ws, positions: List[Position], prices: Dict[str, float], 
-                                title: str, writer: ExcelWriter):
-        """Write deliverable sheet using ExcelWriter logic"""
-        
-        # Title
-        ws.cell(1, 1, f"{title} DELIVERABLES").font = Font(bold=True, size=12)
-        
-        # Headers
-        headers = [
-            "Underlying", "Symbol", "Expiry", "Position", "Type", "Strike",
-            "System Deliverable", "Override Deliverable", "System Price",
-            "Override Price", "BBG Price", "BBG Deliverable"
-        ]
-        
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(3, col, header)
-            cell.font = writer.header_font
-            cell.fill = writer.header_fill
-            cell.alignment = writer.header_alignment
-            cell.border = writer.border
-        
-        # Group positions by underlying
-        grouped = {}
-        for pos in positions:
-            if pos.underlying_ticker not in grouped:
-                grouped[pos.underlying_ticker] = []
-            grouped[pos.underlying_ticker].append(pos)
-        
-        current_row = 4
-        
-        for underlying in sorted(grouped.keys()):
-            underlying_positions = grouped[underlying]
-            group_start_row = current_row
-            
-            # Group header
-            cell = ws.cell(current_row, 1, underlying)
-            cell.font = writer.group_font
-            
-            for col in range(1, 13):
-                cell = ws.cell(current_row, col)
-                cell.fill = writer.group_fill
-                cell.border = writer.border
-            
-            # Get price
-            symbol = underlying_positions[0].symbol
-            spot_price = prices.get(symbol)
-            
-            if spot_price:
-                price_cell = ws.cell(current_row, 9, spot_price)
-                price_cell.number_format = writer.price_format
-            
-            current_row += 1
-            detail_rows = []
-            
-            # Sort and write detail rows
-            underlying_positions.sort(key=lambda x: (x.expiry_date, x.strike_price))
-            
-            for pos in underlying_positions:
-                ws.cell(current_row, 2, pos.bloomberg_ticker)
-                ws.cell(current_row, 3, pos.expiry_date.strftime('%Y-%m-%d'))
-                ws.cell(current_row, 4, pos.position_lots)
-                ws.cell(current_row, 5, pos.security_type)
-                
-                if pos.strike_price > 0:
-                    strike_cell = ws.cell(current_row, 6, pos.strike_price)
-                    strike_cell.number_format = writer.price_format
-                
-                # Deliverable calculation
-                if spot_price:
-                    if pos.security_type == 'Futures':
-                        deliverable = pos.position_lots
-                    elif pos.security_type == 'Call':
-                        deliverable = pos.position_lots if spot_price > pos.strike_price else 0
-                    elif pos.security_type == 'Put':
-                        deliverable = -pos.position_lots if spot_price < pos.strike_price else 0
-                    else:
-                        deliverable = 0
-                    
-                    deliv_cell = ws.cell(current_row, 7, deliverable)
-                    deliv_cell.number_format = writer.deliv_format
-                
-                for col in range(1, 13):
-                    ws.cell(current_row, col).border = writer.border
-                
-                detail_rows.append(current_row)
-                current_row += 1
-            
-            # Group totals
-            if detail_rows and spot_price:
-                total = sum(ws.cell(row, 7).value or 0 for row in detail_rows)
-                total_cell = ws.cell(group_start_row, 7, total)
-                total_cell.number_format = writer.deliv_format
-        
-        # Set column widths
-        ws.column_dimensions['A'].width = 25
-        ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 12
-        ws.column_dimensions['D'].width = 10
-        ws.column_dimensions['E'].width = 8
-        ws.column_dimensions['F'].width = 10
-        ws.column_dimensions['G'].width = 15
-        ws.column_dimensions['H'].width = 15
-        ws.column_dimensions['I'].width = 12
-        ws.column_dimensions['J'].width = 12
-        ws.column_dimensions['K'].width = 12
-        ws.column_dimensions['L'].width = 15
-    
-    def _write_iv_sheet(self, ws, positions: List[Position], prices: Dict[str, float], 
-                       title: str, writer: ExcelWriter):
-        """Write IV sheet using ExcelWriter logic"""
-        
-        # Title and grand total row
-        ws.cell(1, 1, f"{title} INTRINSIC VALUE").font = Font(bold=True, size=12)
-        
-        grand_total_row = 2
-        ws.cell(grand_total_row, 1, "GRAND TOTAL").font = Font(bold=True, size=12)
-        
-        for col in range(1, 11):
-            cell = ws.cell(grand_total_row, col)
-            cell.fill = PatternFill(start_color="FFD700", end_color="FFD700", fill_type="solid")
-            cell.border = writer.border
-        
-        # Headers
-        headers = [
-            "Underlying", "Symbol", "Expiry", "Position", "Type", "Strike", "Lot Size",
-            "IV (INR)", "IV (USD)", "Price"
-        ]
-        
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(4, col, header)
-            cell.font = writer.header_font
-            cell.fill = writer.header_fill
-            cell.alignment = writer.header_alignment
-            cell.border = writer.border
-        
-        # Group positions by underlying
-        grouped = {}
-        for pos in positions:
-            if pos.underlying_ticker not in grouped:
-                grouped[pos.underlying_ticker] = []
-            grouped[pos.underlying_ticker].append(pos)
-        
-        current_row = 5
-        total_iv_inr = 0
-        total_iv_usd = 0
-        
-        for underlying in sorted(grouped.keys()):
-            underlying_positions = grouped[underlying]
-            
-            # Group header
-            cell = ws.cell(current_row, 1, underlying)
-            cell.font = writer.group_font
-            
-            for col in range(1, 11):
-                cell = ws.cell(current_row, col)
-                cell.fill = writer.group_fill
-                cell.border = writer.border
-            
-            # Get price
-            symbol = underlying_positions[0].symbol
-            spot_price = prices.get(symbol, 0)
-            
-            if spot_price:
-                price_cell = ws.cell(current_row, 10, spot_price)
-                price_cell.number_format = writer.price_format
-            
-            current_row += 1
-            group_iv_inr = 0
-            
-            # Sort and write detail rows
-            underlying_positions.sort(key=lambda x: (x.expiry_date, x.strike_price))
-            
-            for pos in underlying_positions:
-                ws.cell(current_row, 2, pos.bloomberg_ticker)
-                ws.cell(current_row, 3, pos.expiry_date.strftime('%Y-%m-%d'))
-                ws.cell(current_row, 4, pos.position_lots)
-                ws.cell(current_row, 5, pos.security_type)
-                
-                if pos.strike_price > 0:
-                    strike_cell = ws.cell(current_row, 6, pos.strike_price)
-                    strike_cell.number_format = writer.price_format
-                
-                ws.cell(current_row, 7, pos.lot_size)
-                
-                # IV calculation
-                iv_inr = 0
-                if spot_price:
-                    if pos.security_type == 'Call' and spot_price > pos.strike_price:
-                        iv_inr = pos.position_lots * pos.lot_size * (spot_price - pos.strike_price)
-                    elif pos.security_type == 'Put' and spot_price < pos.strike_price:
-                        iv_inr = pos.position_lots * pos.lot_size * (pos.strike_price - spot_price)
-                
-                iv_usd = iv_inr / writer.usdinr_rate
-                
-                iv_inr_cell = ws.cell(current_row, 8, iv_inr)
-                iv_inr_cell.number_format = writer.iv_format
-                
-                iv_usd_cell = ws.cell(current_row, 9, iv_usd)
-                iv_usd_cell.number_format = writer.iv_format
-                
-                group_iv_inr += iv_inr
-                
-                for col in range(1, 11):
-                    ws.cell(current_row, col).border = writer.border
-                
-                current_row += 1
-            
-            # Group total
-            group_iv_usd = group_iv_inr / writer.usdinr_rate
-            total_iv_inr += group_iv_inr
-            total_iv_usd += group_iv_usd
-        
-        # Grand totals
-        ws.cell(grand_total_row, 8, total_iv_inr).number_format = writer.iv_format
-        ws.cell(grand_total_row, 9, total_iv_usd).number_format = writer.iv_format
-        
-        # Set column widths
-        ws.column_dimensions['A'].width = 25
-        ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 12
-        ws.column_dimensions['D'].width = 10
-        ws.column_dimensions['E'].width = 8
-        ws.column_dimensions['F'].width = 10
-        ws.column_dimensions['G'].width = 10
-        ws.column_dimensions['H'].width = 15
-        ws.column_dimensions['I'].width = 15
-        ws.column_dimensions['J'].width = 12
     
     def _write_positions_sheet(self, ws, df, header_font, header_fill, border):
         """Helper to write positions data to worksheet"""
@@ -1073,36 +870,3 @@ class TradePositionReconciler:
         ws.column_dimensions['E'].width = 10
         ws.column_dimensions['F'].width = 10
         ws.column_dimensions['G'].width = 10
-    
-    def _write_trades_sheet(self, ws, trades, header_font, header_fill, border):
-        """Helper to write trades data to worksheet"""
-        headers = ['Underlying', 'Symbol', 'Expiry', 'Type', 'Strike', 
-                  'Trade Type', 'Quantity', 'Price', 'Position Change']
-        
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(1, col, header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.border = border
-        
-        for row_idx, trade in enumerate(trades, 2):
-            ws.cell(row_idx, 1, trade.underlying_ticker).border = border
-            ws.cell(row_idx, 2, trade.bloomberg_ticker).border = border
-            ws.cell(row_idx, 3, trade.expiry_date.strftime('%Y-%m-%d')).border = border
-            ws.cell(row_idx, 4, trade.security_type).border = border
-            ws.cell(row_idx, 5, trade.strike_price if trade.strike_price > 0 else '').border = border
-            ws.cell(row_idx, 6, trade.trade_type).border = border
-            ws.cell(row_idx, 7, abs(trade.position_change)).border = border
-            ws.cell(row_idx, 8, trade.trade_price).border = border
-            ws.cell(row_idx, 9, trade.position_change).border = border
-        
-        # Set column widths
-        ws.column_dimensions['A'].width = 25
-        ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 12
-        ws.column_dimensions['D'].width = 10
-        ws.column_dimensions['E'].width = 10
-        ws.column_dimensions['F'].width = 12
-        ws.column_dimensions['G'].width = 12
-        ws.column_dimensions['H'].width = 10
-        ws.column_dimensions['I'].width = 15

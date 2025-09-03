@@ -734,55 +734,102 @@ class StreamlitDeliveryApp:
             st.write("- Column B: Position")
             return
         
+        # Run reconciliation button
         if not st.session_state.recon_results:
-            if st.button("🔄 Run Reconciliation", type="primary"):
+            if st.button("🔄 Run Reconciliation", type="primary", use_container_width=True):
                 with st.spinner("Performing reconciliation..."):
                     self.perform_reconciliation()
+                    st.success("✅ Reconciliation completed!")
+                    st.rerun()  # Rerun to show results
+            return
         
+        # Display reconciliation results
         if st.session_state.recon_results:
             results = st.session_state.recon_results
             
-            # Check if we have dual reconciliation
+            # Check if we have dual reconciliation (with trades)
             if st.session_state.has_trades and 'final' in results:
                 # Dual reconciliation display
                 st.subheader("📊 Dual Reconciliation Summary")
+                st.info("Reconciliation performed against both Initial and Final positions")
                 
+                # Summary metrics in columns
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.write("**Initial Positions Reconciliation:**")
+                    st.markdown("### Initial Positions Reconciliation")
                     initial_summary = results['initial']['summary']
-                    st.metric("Total Discrepancies", initial_summary['total_discrepancies'])
-                    st.write(f"- Matched: {initial_summary['matched_count']}")
-                    st.write(f"- Mismatches: {initial_summary['mismatch_count']}")
-                    st.write(f"- Missing in Recon: {initial_summary['missing_in_recon_count']}")
-                    st.write(f"- Missing in Delivery: {initial_summary['missing_in_delivery_count']}")
+                    
+                    # Metrics
+                    mcol1, mcol2 = st.columns(2)
+                    with mcol1:
+                        st.metric("Matched", initial_summary['matched_count'])
+                        st.metric("Mismatches", initial_summary['mismatch_count'])
+                    with mcol2:
+                        st.metric("Missing in Recon", initial_summary['missing_in_recon_count'])
+                        st.metric("Missing in Delivery", initial_summary['missing_in_delivery_count'])
+                    
+                    # Total discrepancies
+                    if initial_summary['total_discrepancies'] > 0:
+                        st.error(f"⚠️ Total Discrepancies: {initial_summary['total_discrepancies']}")
+                    else:
+                        st.success("✅ All positions match!")
                 
                 with col2:
-                    st.write("**Final Positions Reconciliation:**")
+                    st.markdown("### Final Positions Reconciliation")
                     final_summary = results['final']['summary']
-                    st.metric("Total Discrepancies", final_summary['total_discrepancies'])
-                    st.write(f"- Matched: {final_summary['matched_count']}")
-                    st.write(f"- Mismatches: {final_summary['mismatch_count']}")
-                    st.write(f"- Missing in Recon: {final_summary['missing_in_recon_count']}")
-                    st.write(f"- Missing in Delivery: {final_summary['missing_in_delivery_count']}")
+                    
+                    # Metrics
+                    mcol1, mcol2 = st.columns(2)
+                    with mcol1:
+                        st.metric("Matched", final_summary['matched_count'])
+                        st.metric("Mismatches", final_summary['mismatch_count'])
+                    with mcol2:
+                        st.metric("Missing in Recon", final_summary['missing_in_recon_count'])
+                        st.metric("Missing in Delivery", final_summary['missing_in_delivery_count'])
+                    
+                    # Total discrepancies
+                    if final_summary['total_discrepancies'] > 0:
+                        st.error(f"⚠️ Total Discrepancies: {final_summary['total_discrepancies']}")
+                    else:
+                        st.success("✅ All positions match!")
                 
-                # Select which reconciliation to view in detail
+                st.divider()
+                
+                # Detailed view selector
+                st.subheader("📋 Detailed Reconciliation View")
                 recon_view = st.radio(
-                    "View detailed reconciliation:",
-                    ["Initial Positions", "Final Positions"]
+                    "Select reconciliation details to view:",
+                    ["Initial Positions vs Recon", "Final Positions vs Recon", "Compare Both"]
                 )
                 
-                if recon_view == "Initial Positions":
-                    display_results = results['initial']
-                else:
-                    display_results = results['final']
+                if recon_view == "Compare Both":
+                    # Show comparison of both
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("#### Initial Positions Discrepancies")
+                        self._display_recon_details(results['initial'], "Initial")
+                    
+                    with col2:
+                        st.markdown("#### Final Positions Discrepancies")
+                        self._display_recon_details(results['final'], "Final")
+                
+                elif recon_view == "Initial Positions vs Recon":
+                    self._display_recon_details(results['initial'], "Initial")
+                
+                else:  # Final Positions vs Recon
+                    self._display_recon_details(results['final'], "Final")
+            
             else:
-                # Single reconciliation display
+                # Single reconciliation display (no trades)
                 st.subheader("📊 Reconciliation Summary")
+                st.info("Reconciliation performed against Initial positions only (no trades)")
+                
                 display_results = results['initial']
                 summary = display_results['summary']
                 
+                # Summary metrics
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
@@ -797,36 +844,52 @@ class StreamlitDeliveryApp:
                 with col4:
                     st.metric("Missing in Delivery", summary['missing_in_delivery_count'])
                 
-                # Show total discrepancies prominently
+                # Total discrepancies
                 if summary['total_discrepancies'] > 0:
                     st.error(f"⚠️ Total Discrepancies: {summary['total_discrepancies']}")
                 else:
                     st.success("✅ All positions match perfectly!")
-            
-            # Display detailed discrepancies
-            if display_results.get('position_mismatches'):
-                st.subheader("🔍 Position Mismatches")
-                mismatch_df = pd.DataFrame(display_results['position_mismatches'])
-                st.dataframe(
-                    mismatch_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        'Delivery_Position': st.column_config.NumberColumn(format="%.2f"),
-                        'Recon_Position': st.column_config.NumberColumn(format="%.2f"),
-                        'Difference': st.column_config.NumberColumn(format="%.2f"),
-                    }
-                )
-            
-            if display_results.get('missing_in_recon'):
-                st.subheader("📋 Missing in Recon File")
-                missing_recon_df = pd.DataFrame(display_results['missing_in_recon'])
-                st.dataframe(missing_recon_df, use_container_width=True, hide_index=True)
-            
-            if display_results.get('missing_in_delivery'):
-                st.subheader("📋 Missing in Delivery Output")
-                missing_delivery_df = pd.DataFrame(display_results['missing_in_delivery'])
-                st.dataframe(missing_delivery_df, use_container_width=True, hide_index=True)
+                
+                st.divider()
+                
+                # Display detailed discrepancies
+                st.subheader("📋 Detailed Discrepancies")
+                self._display_recon_details(display_results, "Initial")
+    
+    def _display_recon_details(self, recon_results, label):
+        """Display detailed reconciliation discrepancies"""
+        # Position mismatches
+        if recon_results.get('position_mismatches'):
+            st.write(f"**🔍 Position Mismatches ({label})**")
+            mismatch_df = pd.DataFrame(recon_results['position_mismatches'])
+            st.dataframe(
+                mismatch_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'Delivery_Position': st.column_config.NumberColumn(format="%.2f"),
+                    'Recon_Position': st.column_config.NumberColumn(format="%.2f"),
+                    'Difference': st.column_config.NumberColumn(format="%.2f"),
+                }
+            )
+        
+        # Missing in recon
+        if recon_results.get('missing_in_recon'):
+            st.write(f"**📋 Missing in Recon File ({label})**")
+            missing_recon_df = pd.DataFrame(recon_results['missing_in_recon'])
+            st.dataframe(missing_recon_df, use_container_width=True, hide_index=True)
+        
+        # Missing in delivery
+        if recon_results.get('missing_in_delivery'):
+            st.write(f"**📋 Missing in Delivery Output ({label})**")
+            missing_delivery_df = pd.DataFrame(recon_results['missing_in_delivery'])
+            st.dataframe(missing_delivery_df, use_container_width=True, hide_index=True)
+        
+        # If no discrepancies
+        if (not recon_results.get('position_mismatches') and 
+            not recon_results.get('missing_in_recon') and 
+            not recon_results.get('missing_in_delivery')):
+            st.success(f"✅ No discrepancies found for {label} positions!")
     
     def generate_consolidated_report(self, delivery_file: str, recon_file: str) -> str:
         """Combine delivery report and reconciliation report into a single Excel file"""

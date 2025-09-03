@@ -543,129 +543,160 @@ class TradePositionReconciler:
         return True
     
     def _create_enhanced_report(self, output_file: str, beginning_df: pd.DataFrame,
-                               trade_positions: List[TradePosition], 
-                               post_trade_df: pd.DataFrame,
-                               positions: List[Position], 
-                               prices: Dict[str, float]):
-        """Create Excel report with complete pre and post trade positions"""
-        
-        # Create main workbook
-        wb = Workbook()
-        wb.remove(wb.active)
-        
-        # Define styles
-        header_font = Font(bold=True, size=11)
-        header_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
-        border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
-        
-        # 1. Summary Sheet
-        ws_summary = wb.create_sheet("Summary")
-        ws_summary.cell(1, 1, "TRADE RECONCILIATION").font = Font(bold=True, size=14)
-        ws_summary.cell(3, 1, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        ws_summary.cell(5, 1, f"Pre-Trade Positions: {len(beginning_df)}")
-        ws_summary.cell(6, 1, f"Trades Executed: {len(trade_positions)}")
-        ws_summary.cell(7, 1, f"Post-Trade Positions: {len([r for _, r in post_trade_df.iterrows() if r['Position'] != 0])}")
-        
-        # 2. Trades Sheet
-        ws_trades = wb.create_sheet("Trades")
-        trade_headers = ['#', 'Underlying', 'Symbol', 'Expiry', 'Type', 'Strike', 'Side', 'Qty', 'Price']
-        for col, header in enumerate(trade_headers, 1):
-            ws_trades.cell(1, col, header).font = header_font
-            ws_trades.cell(1, col).fill = header_fill
-            ws_trades.cell(1, col).border = border
-        
-        for idx, trade in enumerate(trade_positions, 2):
-            ws_trades.cell(idx, 1, idx-1)
-            ws_trades.cell(idx, 2, trade.underlying_ticker)
-            ws_trades.cell(idx, 3, trade.symbol)
-            ws_trades.cell(idx, 4, trade.expiry_date.strftime('%Y-%m-%d'))
-            ws_trades.cell(idx, 5, trade.security_type)
-            ws_trades.cell(idx, 6, trade.strike_price if trade.strike_price > 0 else '')
-            ws_trades.cell(idx, 7, trade.trade_type)
-            ws_trades.cell(idx, 8, abs(trade.position_change))
-            ws_trades.cell(idx, 9, trade.trade_price)
-        
-        # 3. Pre-Trade Positions
-        pre_positions = []
-        for _, row in beginning_df.iterrows():
-            pos = Position(
-                underlying_ticker=row['Underlying'],
-                bloomberg_ticker=row['Symbol'],
-                symbol=str(row['Symbol']).split()[0] if ' ' in str(row['Symbol']) else row['Symbol'],
-                expiry_date=pd.to_datetime(row['Expiry']),
-                position_lots=float(row['Position']),
-                security_type=row['Type'],
-                strike_price=float(row['Strike']) if row.get('Strike') and str(row['Strike']).strip() else 0,
-                lot_size=int(row['Lot Size']) if row.get('Lot Size') else 1
-            )
-            pre_positions.append(pos)
-        
-        # Generate pre-trade sheets in temp file
-        temp_pre = f"temp_pre_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        pre_writer = ExcelWriter(temp_pre, self.usdinr_rate)
-        pre_writer.create_report(pre_positions, prices, [])
-        
-        # Copy pre-trade sheets
-        pre_wb = load_workbook(temp_pre)
-        for sheet_name in pre_wb.sheetnames:
-            if 'Unmapped' not in sheet_name:
-                source = pre_wb[sheet_name]
-                new_name = f"PreTrade_{sheet_name}"[:31]  # Excel sheet name limit
-                target = wb.create_sheet(new_name)
-                
-                for row in source.iter_rows(values_only=True):
-                    target.append(row)
-                
-                # Copy column widths
-                for col in source.column_dimensions:
-                    target.column_dimensions[col].width = source.column_dimensions[col].width
-        
-        pre_wb.close()
-        os.remove(temp_pre)
-        
-        # 4. Post-Trade Positions
-        temp_post = f"temp_post_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        post_writer = ExcelWriter(temp_post, self.usdinr_rate)
-        post_writer.create_report(positions, prices, [])
-        
-        # Copy post-trade sheets
-        post_wb = load_workbook(temp_post)
-        for sheet_name in post_wb.sheetnames:
-            if 'Unmapped' not in sheet_name:
-                source = post_wb[sheet_name]
-                new_name = f"PostTrade_{sheet_name}"[:31]
-                target = wb.create_sheet(new_name)
-                
-                for row in source.iter_rows(values_only=True):
-                    target.append(row)
-                
-                for col in source.column_dimensions:
-                    target.column_dimensions[col].width = source.column_dimensions[col].width
-        
-        post_wb.close()
-        os.remove(temp_post)
-        
-        # Save final report
-        wb.save(output_file)
-        logger.info(f"Report saved: {output_file}")
+                           trade_positions: List[TradePosition], 
+                           post_trade_df: pd.DataFrame,
+                           positions: List[Position], 
+                           prices: Dict[str, float]):
+    """Create Excel report with complete pre and post trade positions"""
     
-    def _write_positions_sheet(self, ws, df, header_font, header_fill, border):
-        """Helper to write positions data to worksheet"""
-        headers = ['Underlying', 'Symbol', 'Expiry', 'Position', 'Type', 'Strike', 'Lot Size']
-        
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(1, col, header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.border = border
-        
-        for row_idx, (_, row) in enumerate(df.iterrows(), 2):
-            for col_idx, header in enumerate(headers, 1):
-                value = row.get(header, '')
-                cell = ws.cell(row_idx, col_idx, value)
-                cell.border = border
+    # Create a single ExcelWriter instance
+    writer = ExcelWriter(output_file, self.usdinr_rate)
+    wb = writer.wb
+    
+    # Clear any default sheets
+    for sheet in wb.worksheets:
+        wb.remove(sheet)
+    
+    # Define styles
+    header_font = Font(bold=True, size=11)
+    header_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+    trade_fill = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")
+    border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    
+    # ============= 1. SUMMARY SHEET =============
+    ws_summary = wb.create_sheet("Summary")
+    ws_summary.cell(1, 1, "TRADE RECONCILIATION SUMMARY").font = Font(bold=True, size=14)
+    ws_summary.cell(3, 1, f"Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    ws_summary.cell(5, 1, f"Pre-Trade Positions: {len(beginning_df)}")
+    ws_summary.cell(6, 1, f"Trades Executed: {len(trade_positions)}")
+    ws_summary.cell(7, 1, f"Post-Trade Positions: {len([r for _, r in post_trade_df.iterrows() if r['Position'] != 0])}")
+    
+    # ============= 2. TRADES SHEET =============
+    ws_trades = wb.create_sheet("Trades")
+    trade_headers = ['Trade #', 'Underlying', 'Symbol', 'Expiry', 'Type', 'Strike', 'Side', 'Quantity', 'Price']
+    
+    for col, header in enumerate(trade_headers, 1):
+        ws_trades.cell(1, col, header).font = header_font
+        ws_trades.cell(1, col).fill = trade_fill
+        ws_trades.cell(1, col).border = border
+    
+    for idx, trade in enumerate(trade_positions, 2):
+        ws_trades.cell(idx, 1, idx-1)
+        ws_trades.cell(idx, 2, trade.underlying_ticker)
+        ws_trades.cell(idx, 3, trade.symbol)
+        ws_trades.cell(idx, 4, trade.expiry_date.strftime('%Y-%m-%d'))
+        ws_trades.cell(idx, 5, trade.security_type)
+        ws_trades.cell(idx, 6, trade.strike_price if trade.strike_price > 0 else '')
+        ws_trades.cell(idx, 7, trade.trade_type)
+        ws_trades.cell(idx, 8, abs(trade.position_change))
+        ws_trades.cell(idx, 9, trade.trade_price)
+    
+    # ============= 3. PRE-TRADE SHEETS =============
+    # Convert beginning positions to Position objects
+    pre_positions = []
+    for _, row in beginning_df.iterrows():
+        pos = Position(
+            underlying_ticker=row['Underlying'],
+            bloomberg_ticker=row['Symbol'],
+            symbol=str(row['Symbol']).split()[0] if ' ' in str(row['Symbol']) else row['Symbol'],
+            expiry_date=pd.to_datetime(row['Expiry']),
+            position_lots=float(row['Position']),
+            security_type=row['Type'],
+            strike_price=float(row['Strike']) if row.get('Strike') and str(row['Strike']).strip() else 0,
+            lot_size=int(row['Lot Size']) if row.get('Lot Size') else 1
+        )
+        pre_positions.append(pos)
+    
+    # Create PreTrade_All_Positions
+    ws_pre_all = wb.create_sheet("PreTrade_All_Positions")
+    self._write_positions_sheet(ws_pre_all, beginning_df, header_font, header_fill, border)
+    
+    # IMPORTANT: Now we manually create pre-trade deliverable and IV sheets
+    # First, let's create the master sheet for pre-trade
+    writer.write_master_sheet(pre_positions, prices)
+    # Find the sheet that was just created and rename it
+    for sheet in wb.worksheets:
+        if sheet.title == "Master_All_Expiries":
+            sheet.title = "PreTrade_Master"
+            break
+    
+    # Create pre-trade expiry sheets
+    pre_expiries = list(set(p.expiry_date for p in pre_positions))
+    for expiry in sorted(pre_expiries):
+        writer.write_expiry_sheet(expiry, pre_positions, prices)
+        # Find and rename
+        old_name = f"Expiry_{expiry.strftime('%Y_%m_%d')}"
+        for sheet in wb.worksheets:
+            if sheet.title == old_name:
+                sheet.title = f"PreTrade_{old_name}"
+                break
+    
+    # Create pre-trade IV master
+    writer.write_iv_master_sheet(pre_positions, prices)
+    for sheet in wb.worksheets:
+        if sheet.title == "IV_All_Expiries":
+            sheet.title = "PreTrade_IV_Master"
+            break
+    
+    # Create pre-trade IV expiry sheets
+    for expiry in sorted(pre_expiries):
+        writer.write_iv_expiry_sheet(expiry, pre_positions, prices)
+        old_name = f"IV_Expiry_{expiry.strftime('%Y_%m_%d')}"
+        for sheet in wb.worksheets:
+            if sheet.title == old_name:
+                sheet.title = f"PreTrade_{old_name}"
+                break
+    
+    # ============= 4. POST-TRADE SHEETS =============
+    # Create PostTrade_All_Positions
+    ws_post_all = wb.create_sheet("PostTrade_All_Positions")
+    post_trade_non_zero = post_trade_df[post_trade_df['Position'] != 0].copy()
+    self._write_positions_sheet(ws_post_all, post_trade_non_zero, header_font, header_fill, border)
+    
+    # Create post-trade deliverable and IV sheets
+    writer.write_master_sheet(positions, prices)
+    for sheet in wb.worksheets:
+        if sheet.title == "Master_All_Expiries":
+            sheet.title = "PostTrade_Master"
+            break
+    
+    # Create post-trade expiry sheets
+    post_expiries = list(set(p.expiry_date for p in positions))
+    for expiry in sorted(post_expiries):
+        writer.write_expiry_sheet(expiry, positions, prices)
+        old_name = f"Expiry_{expiry.strftime('%Y_%m_%d')}"
+        for sheet in wb.worksheets:
+            if sheet.title == old_name:
+                sheet.title = f"PostTrade_{old_name}"
+                break
+    
+    # Create post-trade IV master
+    writer.write_iv_master_sheet(positions, prices)
+    for sheet in wb.worksheets:
+        if sheet.title == "IV_All_Expiries":
+            sheet.title = "PostTrade_IV_Master"
+            break
+    
+    # Create post-trade IV expiry sheets
+    for expiry in sorted(post_expiries):
+        writer.write_iv_expiry_sheet(expiry, positions, prices)
+        old_name = f"IV_Expiry_{expiry.strftime('%Y_%m_%d')}"
+        for sheet in wb.worksheets:
+            if sheet.title == old_name:
+                sheet.title = f"PostTrade_{old_name}"
+                break
+    
+    # Remove any "All_Positions" sheet if it was created
+    for sheet in wb.worksheets:
+        if sheet.title == "All_Positions":
+            wb.remove(sheet)
+            break
+    
+    # Save the workbook
+    wb.save(output_file)
+    logger.info(f"Complete report saved with all sheets: {output_file}")

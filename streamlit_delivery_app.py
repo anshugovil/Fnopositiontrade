@@ -18,7 +18,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from copy import copy
 
 # Import your modules
-from input_parser import InputParser, Position
+from input_parser import InputParser
 from trade_parser import TradeParser
 from price_fetcher import PriceFetcher
 from excel_writer import ExcelWriter

@@ -287,24 +287,34 @@ class StreamlitDeliveryApp:
                     else:
                         st.error(f"❌ {message}")
     
-    def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_prices):
-        """Process the trade file"""
+def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_prices):
+    """Process the trade file"""
+    try:
+        # Save trade file temporarily
+        suffix = os.path.splitext(trade_file.name)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, mode='wb') as tmp_file:
+            tmp_file.write(trade_file.getvalue())
+            trade_file_path = tmp_file.name
+        
+        # Parse trades - Add more detailed error handling here
         try:
-            # Save trade file temporarily
-            suffix = os.path.splitext(trade_file.name)[1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, mode='wb') as tmp_file:
-                tmp_file.write(trade_file.getvalue())
-                trade_file_path = tmp_file.name
-            
-            # Parse trades
             trade_parser = TradeParser(mapping_file_path)
+            st.write("TradeParser initialized successfully")  # Debug line
+            
             trade_positions = trade_parser.parse_trade_file(trade_file_path)
+            st.write(f"Trade parsing returned: {len(trade_positions) if trade_positions else 0} positions")  # Debug line
             
-            if not trade_positions:
-                st.warning("No valid trade positions found in trade file")
-                return False
-            
-            st.session_state.trade_positions = trade_positions
+        except Exception as parse_error:
+            st.error(f"Error during trade parsing: {str(parse_error)}")
+            import traceback
+            st.error(traceback.format_exc())  # This will show the full error trace
+            return False
+        
+        if not trade_positions:
+            st.warning("No valid trade positions found in trade file")
+            return False
+        
+        st.session_state.trade_positions = trade_positions
             
             # Fetch additional prices if needed
             if fetch_prices:

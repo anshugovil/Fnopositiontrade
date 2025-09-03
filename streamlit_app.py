@@ -317,7 +317,7 @@ def process_trade_file(self, trade_file, mapping_file_path, format_hint, fetch_p
         st.session_state.trade_positions = trade_positions
             
             # Fetch additional prices if needed
-            if fetch_prices:
+        if fetch_prices:
                 symbols_to_fetch = list(set(p.symbol for p in trade_positions 
                                           if p.symbol not in st.session_state.prices))
                 if symbols_to_fetch:

@@ -1,13 +1,13 @@
 """
-Position Reconciliation Module
-Compares positions from delivery calculator output with external recon file
+Position Reconciliation Module - Enhanced Version
+Supports reconciliation against both Initial and Final positions
 """
 
 import pandas as pd
 import numpy as np
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,19 +29,13 @@ class PositionReconciliation:
             bottom=Side(style='thin')
         )
     
-    def read_all_positions_sheet(self, excel_file_path: str) -> pd.DataFrame:
-        """Read All_Positions sheet from delivery calculator output"""
+    def read_positions_sheet(self, excel_file_path: str, sheet_name: str) -> pd.DataFrame:
+        """Read a specific positions sheet from delivery calculator output"""
         try:
-            # Read the All_Positions sheet
-            df = pd.read_excel(excel_file_path, sheet_name='All_Positions')
+            # Read the specified sheet
+            df = pd.read_excel(excel_file_path, sheet_name=sheet_name)
             
             # We need columns B (Symbol) and D (Position)
-            # Assuming headers are in row 1, so columns are:
-            # Column A (index 0): Underlying
-            # Column B (index 1): Symbol
-            # Column C (index 2): Expiry
-            # Column D (index 3): Position
-            
             positions_df = pd.DataFrame({
                 'Symbol': df.iloc[:, 1],  # Column B - Bloomberg Ticker
                 'Position': df.iloc[:, 3]  # Column D - Position
@@ -53,12 +47,16 @@ class PositionReconciliation:
             # Sort by Symbol
             positions_df = positions_df.sort_values('Symbol', ascending=True)
             
-            logger.info(f"Read {len(positions_df)} positions from All_Positions sheet")
+            logger.info(f"Read {len(positions_df)} positions from {sheet_name} sheet")
             return positions_df
             
         except Exception as e:
-            logger.error(f"Error reading All_Positions sheet: {e}")
+            logger.error(f"Error reading {sheet_name} sheet: {e}")
             raise
+    
+    def read_all_positions_sheet(self, excel_file_path: str) -> pd.DataFrame:
+        """Read All_Positions sheet from delivery calculator output (backward compatibility)"""
+        return self.read_positions_sheet(excel_file_path, 'All_Positions')
     
     def read_recon_file(self, recon_file_path: str) -> pd.DataFrame:
         """Read reconciliation file (Excel or CSV)"""
@@ -177,40 +175,159 @@ class PositionReconciliation:
         
         return results
     
+    def create_dual_recon_report(self, initial_results: Dict, final_results: Dict, output_file: str):
+        """Create Excel report with both Initial and Final reconciliation results"""
+        wb = Workbook()
+        
+        # Remove default sheet
+        wb.remove(wb.active)
+        
+        # 1. Combined Summary Sheet
+        ws_summary = wb.create_sheet("Summary")
+        self._write_dual_summary_sheet(ws_summary, initial_results['summary'], final_results['summary'])
+        
+        # 2. Initial Reconciliation Sheets
+        if initial_results['position_mismatches']:
+            ws_initial_mismatches = wb.create_sheet("RECON_Initial_Mismatches")
+            self._write_mismatches_sheet(ws_initial_mismatches, initial_results['position_mismatches'])
+        
+        if initial_results['missing_in_recon']:
+            ws_initial_missing_recon = wb.create_sheet("RECON_Initial_Missing_in_Recon")
+            self._write_missing_sheet(ws_initial_missing_recon, initial_results['missing_in_recon'], 'Delivery')
+        
+        if initial_results['missing_in_delivery']:
+            ws_initial_missing_delivery = wb.create_sheet("RECON_Initial_Missing_in_Delivery")
+            self._write_missing_sheet(ws_initial_missing_delivery, initial_results['missing_in_delivery'], 'Recon')
+        
+        # 3. Final Reconciliation Sheets
+        if final_results['position_mismatches']:
+            ws_final_mismatches = wb.create_sheet("RECON_Final_Mismatches")
+            self._write_mismatches_sheet(ws_final_mismatches, final_results['position_mismatches'])
+        
+        if final_results['missing_in_recon']:
+            ws_final_missing_recon = wb.create_sheet("RECON_Final_Missing_in_Recon")
+            self._write_missing_sheet(ws_final_missing_recon, final_results['missing_in_recon'], 'Delivery')
+        
+        if final_results['missing_in_delivery']:
+            ws_final_missing_delivery = wb.create_sheet("RECON_Final_Missing_in_Delivery")
+            self._write_missing_sheet(ws_final_missing_delivery, final_results['missing_in_delivery'], 'Recon')
+        
+        # Save the workbook
+        wb.save(output_file)
+        logger.info(f"Dual reconciliation report saved: {output_file}")
+    
     def create_recon_report(self, recon_results: Dict, output_file: str):
-        """Create Excel report with reconciliation results"""
+        """Create Excel report with reconciliation results (single reconciliation)"""
         wb = Workbook()
         
         # Remove default sheet
         wb.remove(wb.active)
         
         # 1. Summary Sheet
-        ws_summary = wb.create_sheet("Summary")
+        ws_summary = wb.create_sheet("RECON_vs_Initial_Summary")
         self._write_summary_sheet(ws_summary, recon_results['summary'])
         
         # 2. Position Mismatches Sheet
         if recon_results['position_mismatches']:
-            ws_mismatches = wb.create_sheet("Position_Mismatches")
+            ws_mismatches = wb.create_sheet("RECON_vs_Initial_Mismatches")
             self._write_mismatches_sheet(ws_mismatches, recon_results['position_mismatches'])
         
         # 3. Missing in Recon Sheet
         if recon_results['missing_in_recon']:
-            ws_missing_recon = wb.create_sheet("Missing_in_Recon")
+            ws_missing_recon = wb.create_sheet("RECON_vs_Initial_Missing_in_Recon")
             self._write_missing_sheet(ws_missing_recon, recon_results['missing_in_recon'], 'Delivery')
         
         # 4. Missing in Delivery Sheet
         if recon_results['missing_in_delivery']:
-            ws_missing_delivery = wb.create_sheet("Missing_in_Delivery")
+            ws_missing_delivery = wb.create_sheet("RECON_vs_Initial_Missing_in_Delivery")
             self._write_missing_sheet(ws_missing_delivery, recon_results['missing_in_delivery'], 'Recon')
         
         # 5. All Matched Positions (optional - for verification)
         if recon_results['matched_positions']:
-            ws_matched = wb.create_sheet("Matched_Positions")
+            ws_matched = wb.create_sheet("RECON_vs_Initial_Matched")
             self._write_matched_sheet(ws_matched, recon_results['matched_positions'])
         
         # Save the workbook
         wb.save(output_file)
         logger.info(f"Reconciliation report saved: {output_file}")
+    
+    def _write_dual_summary_sheet(self, ws, initial_summary, final_summary):
+        """Write combined summary statistics sheet for dual reconciliation"""
+        ws.cell(row=1, column=1, value="POSITION RECONCILIATION SUMMARY").font = Font(bold=True, size=14)
+        
+        # Initial Positions Section
+        row = 3
+        ws.cell(row=row, column=1, value="INITIAL POSITIONS RECONCILIATION").font = Font(bold=True, size=12)
+        ws.cell(row=row, column=1).fill = PatternFill(start_color="E6E6FA", end_color="E6E6FA", fill_type="solid")
+        
+        row += 1
+        initial_items = [
+            ("Total Positions in Initial Delivery", initial_summary['total_delivery_positions']),
+            ("Total Positions in Recon File", initial_summary['total_recon_positions']),
+            ("", ""),
+            ("Matched Positions", initial_summary['matched_count']),
+            ("Position Mismatches", initial_summary['mismatch_count']),
+            ("Missing in Recon File", initial_summary['missing_in_recon_count']),
+            ("Missing in Initial Delivery", initial_summary['missing_in_delivery_count']),
+            ("", ""),
+            ("Total Discrepancies", initial_summary['total_discrepancies'])
+        ]
+        
+        for label, value in initial_items:
+            if label:
+                ws.cell(row=row, column=1, value=label).font = Font(bold=True)
+                ws.cell(row=row, column=2, value=value)
+                
+                if label == "Total Discrepancies":
+                    if value > 0:
+                        ws.cell(row=row, column=2).fill = self.mismatch_fill
+                    else:
+                        ws.cell(row=row, column=2).fill = PatternFill(
+                            start_color="90EE90", end_color="90EE90", fill_type="solid"
+                        )
+            row += 1
+        
+        # Final Positions Section
+        row += 2
+        ws.cell(row=row, column=1, value="FINAL POSITIONS RECONCILIATION (AFTER TRADES)").font = Font(bold=True, size=12)
+        ws.cell(row=row, column=1).fill = PatternFill(start_color="FFE5CC", end_color="FFE5CC", fill_type="solid")
+        
+        row += 1
+        final_items = [
+            ("Total Positions in Final Delivery", final_summary['total_delivery_positions']),
+            ("Total Positions in Recon File", final_summary['total_recon_positions']),
+            ("", ""),
+            ("Matched Positions", final_summary['matched_count']),
+            ("Position Mismatches", final_summary['mismatch_count']),
+            ("Missing in Recon File", final_summary['missing_in_recon_count']),
+            ("Missing in Final Delivery", final_summary['missing_in_delivery_count']),
+            ("", ""),
+            ("Total Discrepancies", final_summary['total_discrepancies'])
+        ]
+        
+        for label, value in final_items:
+            if label:
+                ws.cell(row=row, column=1, value=label).font = Font(bold=True)
+                ws.cell(row=row, column=2, value=value)
+                
+                if label == "Total Discrepancies":
+                    if value > 0:
+                        ws.cell(row=row, column=2).fill = self.mismatch_fill
+                    else:
+                        ws.cell(row=row, column=2).fill = PatternFill(
+                            start_color="90EE90", end_color="90EE90", fill_type="solid"
+                        )
+            row += 1
+        
+        # Add borders
+        for r in range(3, row):
+            for c in range(1, 3):
+                if ws.cell(row=r, column=c).value:
+                    ws.cell(row=r, column=c).border = self.border
+        
+        # Set column widths
+        ws.column_dimensions['A'].width = 35
+        ws.column_dimensions['B'].width = 15
     
     def _write_summary_sheet(self, ws, summary):
         """Write summary statistics sheet"""
@@ -220,12 +337,12 @@ class PositionReconciliation:
         summary_items = [
             ("Total Positions in Delivery Output", summary['total_delivery_positions']),
             ("Total Positions in Recon File", summary['total_recon_positions']),
-            ("", ""),  # Empty row
+            ("", ""),
             ("Matched Positions", summary['matched_count']),
             ("Position Mismatches", summary['mismatch_count']),
             ("Missing in Recon File", summary['missing_in_recon_count']),
             ("Missing in Delivery Output", summary['missing_in_delivery_count']),
-            ("", ""),  # Empty row
+            ("", ""),
             ("Total Discrepancies", summary['total_discrepancies'])
         ]
         
@@ -234,7 +351,6 @@ class PositionReconciliation:
                 ws.cell(row=row, column=1, value=label).font = Font(bold=True)
                 ws.cell(row=row, column=2, value=value)
                 
-                # Highlight total discrepancies
                 if label == "Total Discrepancies":
                     if value > 0:
                         ws.cell(row=row, column=2).fill = self.mismatch_fill
@@ -338,23 +454,38 @@ class PositionReconciliation:
         ws.column_dimensions['A'].width = 35
         ws.column_dimensions['B'].width = 18
     
-    def perform_reconciliation(self, delivery_file: str, recon_file: str, output_file: str) -> Dict:
+    def perform_reconciliation(self, delivery_file: str, recon_file: str, output_file: str, 
+                             has_trades: bool = False) -> Dict:
         """
         Main method to perform reconciliation
-        Returns reconciliation results dictionary
+        If has_trades is True, reconciles against both Initial and Final positions
         """
         try:
-            # Read positions from both files
-            delivery_df = self.read_all_positions_sheet(delivery_file)
             recon_df = self.read_recon_file(recon_file)
             
-            # Perform reconciliation
-            results = self.reconcile_positions(delivery_df, recon_df)
-            
-            # Create report
-            self.create_recon_report(results, output_file)
-            
-            return results
+            if has_trades:
+                # Dual reconciliation - against both Initial and Final
+                initial_df = self.read_positions_sheet(delivery_file, 'Start_All_Positions')
+                final_df = self.read_positions_sheet(delivery_file, 'Final_All_Positions')
+                
+                initial_results = self.reconcile_positions(initial_df, recon_df)
+                final_results = self.reconcile_positions(final_df, recon_df)
+                
+                self.create_dual_recon_report(initial_results, final_results, output_file)
+                
+                return {
+                    'initial': initial_results,
+                    'final': final_results
+                }
+            else:
+                # Single reconciliation - against All_Positions
+                delivery_df = self.read_all_positions_sheet(delivery_file)
+                results = self.reconcile_positions(delivery_df, recon_df)
+                self.create_recon_report(results, output_file)
+                
+                return {
+                    'initial': results
+                }
             
         except Exception as e:
             logger.error(f"Error during reconciliation: {e}")

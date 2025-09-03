@@ -9,9 +9,52 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import re
 import logging
-from input_parser import Position, MONTH_CODE
+import sys
+import os
+
+# Add the current directory to Python path to ensure imports work
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 logger = logging.getLogger(__name__)
+
+# Import from input_parser - try multiple approaches
+try:
+    from input_parser import Position, MONTH_CODE
+    logger.info("Successfully imported Position from input_parser")
+except ImportError as e:
+    logger.error(f"Failed to import from input_parser: {e}")
+    # As a fallback, define Position here if import fails
+    from dataclasses import dataclass
+    
+    @dataclass
+    class Position:
+        """Represents a single position"""
+        underlying_ticker: str
+        bloomberg_ticker: str
+        symbol: str
+        expiry_date: datetime
+        position_lots: float
+        security_type: str  # Futures, Call, Put
+        strike_price: float
+        lot_size: int
+        
+        @property
+        def is_future(self) -> bool:
+            return self.security_type == 'Futures'
+        
+        @property
+        def is_call(self) -> bool:
+            return self.security_type == 'Call'
+        
+        @property
+        def is_put(self) -> bool:
+            return self.security_type == 'Put'
+    
+    # Also define MONTH_CODE if not imported
+    MONTH_CODE = {
+        1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+        7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
+    }
 
 
 class TradeParser:
@@ -22,6 +65,7 @@ class TradeParser:
         self.symbol_mappings = self._load_mappings()
         self.trades = []
         self.format_type = None
+        self.unmapped_symbols = []
         
     def _load_mappings(self) -> Dict:
         """Load symbol mappings from CSV"""
@@ -193,6 +237,11 @@ class TradeParser:
                 mapping = self.normalized_mappings.get(symbol)
                 if not mapping:
                     logger.warning(f"No mapping found for symbol: {symbol}")
+                    self.unmapped_symbols.append({
+                        'symbol': symbol,
+                        'expiry': expiry,
+                        'position_lots': position_lots
+                    })
                     continue
                 
                 # Generate Bloomberg ticker

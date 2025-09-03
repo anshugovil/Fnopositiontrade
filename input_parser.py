@@ -59,6 +59,7 @@ class InputParser:
         self.symbol_mappings = self._load_mappings()
         self.positions = []
         self.unmapped_symbols = []
+        self.format_type = None
     
     def _load_mappings(self) -> Dict:
         """Load symbol mappings from CSV"""
@@ -239,16 +240,34 @@ class InputParser:
         for idx in range(data_start, len(df)):
             try:
                 row = df.iloc[idx]
-                if len(row) < 16 or pd.isna(row.iloc[1]):
+                if len(row) < 15:  # Changed from 16 to 15 - minimum columns needed
                     continue
                 
-                symbol = str(row.iloc[1]).strip()
+                symbol = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else None
+                if not symbol:
+                    continue
+                
                 series = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else 'EQ'
                 expiry = pd.to_datetime(row.iloc[3]) if pd.notna(row.iloc[3]) else datetime.now() + timedelta(30)
                 strike = float(row.iloc[4]) if pd.notna(row.iloc[4]) else 0.0
                 option_type = str(row.iloc[5]).strip() if pd.notna(row.iloc[5]) else ''
                 lot_size = int(row.iloc[6]) if pd.notna(row.iloc[6]) else 1
-                position_lots = float(row.iloc[15]) if pd.notna(row.iloc[15]) else 0.0
+                
+                # Modified position calculation - now uses difference of columns 13 and 14
+                try:
+                    # Column 13 (index 13) - Carry Forward Position Buy
+                    col13_val = float(row.iloc[13]) if pd.notna(row.iloc[13]) else 0.0
+                except (ValueError, TypeError):
+                    col13_val = 0.0
+                
+                try:
+                    # Column 14 (index 14) - Carry Forward Position Sell  
+                    col14_val = float(row.iloc[14]) if pd.notna(row.iloc[14]) else 0.0
+                except (ValueError, TypeError):
+                    col14_val = 0.0
+                
+                # Position = Buy - Sell (columns 13 - 14)
+                position_lots = col13_val - col14_val
                 
                 if position_lots == 0:
                     continue
@@ -334,13 +353,10 @@ class InputParser:
         positions = []
         valid_rows = 0
         
-        # MS format might have positions in different columns
-        position_columns = [21, 20, 19, 11, 10]  # Try different possible columns
-        
         for idx in range(len(df)):
             try:
                 row = df.iloc[idx]
-                if len(row) < 22:
+                if len(row) < 21:  # Need at least 21 columns for col 20 and 21
                     continue
                 
                 contract_id = str(row[0]).strip() if pd.notna(row[0]) else ""
@@ -353,23 +369,26 @@ class InputParser:
                 if any(keyword in contract_id.lower() for keyword in ['total', 'summary', 'net', 'mtm', 'payable', 'receivable']):
                     continue
                 
-                # Try to find position value in different columns
-                position_lots = 0
-                for col_idx in position_columns:
-                    if col_idx < len(row):
-                        try:
-                            val = float(row[col_idx]) if pd.notna(row[col_idx]) else 0
-                            if val != 0:
-                                position_lots = val
-                                break
-                        except (ValueError, TypeError):
-                            continue
+                # Calculate position as column 20 - column 21 (indices 19 - 20)
+                try:
+                    col20_val = float(row[19]) if pd.notna(row[19]) else 0.0
+                except (ValueError, TypeError):
+                    col20_val = 0.0
+                
+                try:
+                    col21_val = float(row[20]) if pd.notna(row[20]) else 0.0
+                except (ValueError, TypeError):
+                    col21_val = 0.0
+                
+                # Position = Column 20 - Column 21
+                position_lots = col20_val - col21_val
                 
                 if position_lots == 0:
                     continue
                 
                 parsed = self._parse_contract_id(contract_id)
                 if parsed:
+                    # MS format always passes None for lot_size to use mapping file
                     position = self._create_position(
                         parsed['symbol'], parsed['expiry'], parsed['strike'],
                         parsed['inst_type'], position_lots, None, parsed['series']
@@ -389,7 +408,7 @@ class InputParser:
     def _find_data_start_bod(self, df: pd.DataFrame) -> int:
         """Find where data starts in BOD format"""
         for i in range(min(100, len(df))):
-            if len(df.iloc[i]) < 16:
+            if len(df.iloc[i]) < 15:  # Changed from 16 to 15
                 continue
             
             col5_val = str(df.iloc[i, 4]).strip() if pd.notna(df.iloc[i, 4]) else ""
@@ -399,8 +418,10 @@ class InputParser:
             try:
                 if pd.notna(df.iloc[i, 4]):
                     float(df.iloc[i, 4])
-                if pd.notna(df.iloc[i, 15]):
-                    float(df.iloc[i, 15])
+                # Check columns 13 and 14 instead of column 15
+                if pd.notna(df.iloc[i, 13]) or pd.notna(df.iloc[i, 14]):
+                    float(df.iloc[i, 13] if pd.notna(df.iloc[i, 13]) else 0)
+                    float(df.iloc[i, 14] if pd.notna(df.iloc[i, 14]) else 0)
                 return i
             except:
                 continue
@@ -498,6 +519,16 @@ class InputParser:
             mapping['ticker'], expiry, security_type, strike
         )
         
+        # Handle lot_size: Use provided value, or mapping value, or 1 if both are None/blank
+        if lot_size is not None:
+            final_lot_size = lot_size
+        else:
+            # For MS format (lot_size is None), use mapping file value
+            final_lot_size = mapping.get('lot_size', 1)
+            # If mapping has no lot_size or it's 0, use 1 as default
+            if not final_lot_size or final_lot_size == 0:
+                final_lot_size = 1
+        
         return Position(
             underlying_ticker=mapping['underlying'],
             bloomberg_ticker=bloomberg_ticker,
@@ -506,20 +537,41 @@ class InputParser:
             position_lots=position_lots,
             security_type=security_type,
             strike_price=strike,
-            lot_size=lot_size or mapping.get('lot_size', 1)
+            lot_size=final_lot_size
         )
     
     def _generate_bloomberg_ticker(self, ticker: str, expiry: datetime,
                                   security_type: str, strike: float) -> str:
         """Generate Bloomberg ticker"""
+        # Check if this is an index ticker (ends with Index or contains specific index names)
+        ticker_upper = ticker.upper()
+        is_index = (ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'NF', 'NBF', 'FNF', 'FINNIFTY', 'MCN', 'MIDCPNIFTY'] 
+                   or 'NIFTY' in ticker_upper 
+                   or ticker_upper.endswith('INDEX'))
+        
         if security_type == 'Futures':
             month_code = MONTH_CODE.get(expiry.month, "")
             year_code = str(expiry.year)[-1]
-            return f"{ticker}={month_code}{year_code} IS Equity"
+            
+            if is_index:
+                # Index futures format: NZU5 Index (no = sign, no space)
+                return f"{ticker}{month_code}{year_code} Index"
+            else:
+                # Stock futures format: RIL=H5 IS Equity (= sign, no space)
+                return f"{ticker}={month_code}{year_code} IS Equity"
         else:
             date_str = expiry.strftime('%m/%d/%y')
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
-            if security_type == 'Call':
-                return f"{ticker} IS {date_str} C{strike_str} Equity"
+            
+            if is_index:
+                # Index options format: NZ 03/27/25 C21000 Index
+                if security_type == 'Call':
+                    return f"{ticker} {date_str} C{strike_str} Index"
+                else:
+                    return f"{ticker} {date_str} P{strike_str} Index"
             else:
-                return f"{ticker} IS {date_str} P{strike_str} Equity"
+                # Stock options format: RIL IS 03/27/25 C1200 Equity
+                if security_type == 'Call':
+                    return f"{ticker} IS {date_str} C{strike_str} Equity"
+                else:
+                    return f"{ticker} IS {date_str} P{strike_str} Equity"

@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 import logging
 from dataclasses import dataclass
 import re
+import os
+from copy import copy
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
@@ -50,7 +52,7 @@ class TradePositionReconciler:
             df = pd.read_csv(self.mapping_file)
             for idx, row in df.iterrows():
                 if pd.notna(row.iloc[0]) and pd.notna(row.iloc[1]):
-                    symbol = str(row.iloc[0]).strip()
+                    symbol = str(row.iloc[0]).strip().upper()
                     ticker = str(row.iloc[1]).strip()
                     
                     # Handle underlying
@@ -61,8 +63,8 @@ class TradePositionReconciler:
                             underlying = underlying_val
                     
                     if not underlying:
-                        if symbol.upper() in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
-                            underlying = f"{symbol.upper()} INDEX"
+                        if symbol in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
+                            underlying = f"{symbol} INDEX"
                         else:
                             underlying = f"{ticker} IS Equity"
                     
@@ -84,37 +86,22 @@ class TradePositionReconciler:
         return mappings
     
     def parse_ms_raw_trade_file(self, trade_file_path: str) -> List[TradePosition]:
-        """Parse raw MS format trade file (the input to WAFRA transformer)"""
+        """Parse raw MS format trade file"""
         trade_positions = []
         
         try:
-            # Read the MS input CSV
             df = pd.read_csv(trade_file_path, header=None)
             logger.info(f"Read MS file with {len(df)} rows and {len(df.columns)} columns")
             
-            # MS format columns:
-            # Col 4: Instrument (OPTSTK, FUTSTK, OPTIDX, FUTIDX)
-            # Col 5: Symbol
-            # Col 6: Expiry
-            # Col 7: Lot Size
-            # Col 8: Strike
-            # Col 9: Option Type (CE/PE)
-            # Col 10: Side (B/S)
-            # Col 12: Quantity
-            # Col 13: Price
-            
             for idx, row in df.iterrows():
                 try:
-                    # Skip header rows or invalid data
                     if len(row) < 14:
                         continue
                     
-                    # Get instrument type
                     instrument = str(row[4]).upper() if pd.notna(row[4]) else ""
                     if instrument not in ['OPTSTK', 'FUTSTK', 'OPTIDX', 'FUTIDX']:
                         continue
                     
-                    # Parse fields
                     symbol = str(row[5]).strip().upper() if pd.notna(row[5]) else ""
                     if not symbol:
                         continue
@@ -127,17 +114,13 @@ class TradePositionReconciler:
                     price = float(row[13]) if pd.notna(row[13]) else 0.0
                     lot_size = int(float(row[7])) if pd.notna(row[7]) else 1
                     
-                    # Skip zero quantity
                     if qty == 0:
                         continue
                     
-                    # Parse expiry date
                     expiry = self._parse_date_flexible(expiry_str)
                     if not expiry:
-                        logger.warning(f"Could not parse expiry date: {expiry_str}")
                         continue
                     
-                    # Determine security type
                     if 'FUT' in instrument:
                         security_type = 'Futures'
                     elif option_type in ['CE', 'C']:
@@ -147,7 +130,6 @@ class TradePositionReconciler:
                     else:
                         continue
                     
-                    # Determine position change (Buy = positive, Sell = negative)
                     if side.startswith('B'):
                         position_change = qty
                         trade_type = 'BUY'
@@ -157,10 +139,8 @@ class TradePositionReconciler:
                     else:
                         continue
                     
-                    # Get mapping for underlying and ticker
                     mapping = self.symbol_mappings.get(symbol, {})
                     if not mapping:
-                        # Use defaults if not mapped
                         if symbol in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
                             underlying = f"{symbol} INDEX"
                             ticker = symbol
@@ -171,12 +151,10 @@ class TradePositionReconciler:
                         underlying = mapping.get('underlying', f"{symbol} IS Equity")
                         ticker = mapping.get('ticker', symbol)
                     
-                    # Generate Bloomberg ticker
                     bloomberg_ticker = self._generate_bloomberg_ticker(
                         ticker, expiry, security_type, strike
                     )
                     
-                    # Create TradePosition
                     trade_pos = TradePosition(
                         underlying_ticker=underlying,
                         bloomberg_ticker=bloomberg_ticker,
@@ -191,11 +169,9 @@ class TradePositionReconciler:
                     )
                     
                     trade_positions.append(trade_pos)
-                    logger.debug(f"Added trade: {symbol} {expiry_str} {security_type} {strike} {trade_type} {qty}")
                     
                 except Exception as e:
                     logger.debug(f"Error parsing row {idx}: {e}")
-                    continue
             
             logger.info(f"Successfully parsed {len(trade_positions)} trades from MS file")
             return trade_positions
@@ -203,30 +179,24 @@ class TradePositionReconciler:
         except Exception as e:
             logger.error(f"Error reading MS trade file: {e}")
             return []
-
-    # [Continue with rest of methods - parse_wafra_trade_file, _parse_date_flexible, etc.]
-    # Due to length, I'll continue in next message if needed
+    
     def parse_wafra_trade_file(self, trade_file_path: str) -> List[TradePosition]:
-        """Parse WAFRA format trade file and convert to position changes"""
+        """Parse WAFRA format trade file"""
         trade_positions = []
         
         try:
-            # Read the WAFRA output CSV
             df = pd.read_csv(trade_file_path)
             
             for _, row in df.iterrows():
-                # Skip rows with UPDATE or missing security
                 if pd.isna(row.get('Security')) or row.get('Security') == 'UPDATE':
                     continue
                 
-                # Parse Bloomberg ticker to extract details
                 security = str(row['Security'])
                 position_details = self._parse_bloomberg_ticker(security)
                 
                 if not position_details:
                     continue
                 
-                # Determine position change
                 transaction = str(row.get('Transaction', '')).upper()
                 qty = float(row.get('Order_Quantity', 0))
                 
@@ -237,10 +207,8 @@ class TradePositionReconciler:
                 else:
                     continue
                 
-                # Get trade price
                 trade_price = float(row.get('Order_Price', 0))
                 
-                # Create TradePosition object
                 trade_pos = TradePosition(
                     underlying_ticker=position_details['underlying'],
                     bloomberg_ticker=security,
@@ -265,17 +233,9 @@ class TradePositionReconciler:
         """Parse date string in various formats"""
         date_str = str(date_str).strip()
         
-        # Try multiple date formats
         formats = [
-            "%d-%b-%Y",  # 27-Mar-2025
-            "%d/%m/%Y",  # 27/03/2025
-            "%d/%m/%y",  # 27/03/25
-            "%Y-%m-%d",  # 2025-03-27
-            "%d-%m-%Y",  # 27-03-2025
-            "%d.%m.%Y",  # 27.03.2025
-            "%d%b%Y",    # 27Mar2025
-            "%d-%b-%y",  # 27-Mar-25
-            "%d %b %Y",  # 27 Mar 2025
+            "%d-%b-%Y", "%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d",
+            "%d-%m-%Y", "%d.%m.%Y", "%d%b%Y", "%d-%b-%y", "%d %b %Y"
         ]
         
         for fmt in formats:
@@ -284,7 +244,6 @@ class TradePositionReconciler:
             except:
                 continue
         
-        # Try pandas parser as fallback
         try:
             return pd.to_datetime(date_str, dayfirst=True)
         except:
@@ -295,7 +254,6 @@ class TradePositionReconciler:
         try:
             ticker = ticker.strip()
             
-            # Futures pattern: SYMBOL=MY IS Equity or SYMBOLMY Index
             if '=' in ticker and 'IS Equity' in ticker:
                 match = re.match(r'([A-Z]+)=([A-Z])(\d)\s+IS\s+Equity', ticker)
                 if match:
@@ -306,10 +264,8 @@ class TradePositionReconciler:
                     month_map = {'F':1,'G':2,'H':3,'J':4,'K':5,'M':6,
                                 'N':7,'Q':8,'U':9,'V':10,'X':11,'Z':12}
                     month = month_map.get(month_code, 1)
-                    
                     year_full = 2020 + int(year)
                     expiry = self._get_expiry_date(year_full, month)
-                    
                     underlying = self._get_underlying_from_symbol(symbol)
                     
                     return {
@@ -320,7 +276,6 @@ class TradePositionReconciler:
                         'strike': 0
                     }
             
-            # Index futures: NIFTYU5 Index
             elif 'Index' in ticker and '=' not in ticker and not ('/' in ticker):
                 match = re.match(r'([A-Z]+)([A-Z])(\d)\s+Index', ticker)
                 if match:
@@ -331,7 +286,6 @@ class TradePositionReconciler:
                     month_map = {'F':1,'G':2,'H':3,'J':4,'K':5,'M':6,
                                 'N':7,'Q':8,'U':9,'V':10,'X':11,'Z':12}
                     month = month_map.get(month_code, 1)
-                    
                     year_full = 2020 + int(year)
                     expiry = self._get_expiry_date(year_full, month)
                     
@@ -343,9 +297,7 @@ class TradePositionReconciler:
                         'strike': 0
                     }
             
-            # Options pattern
             elif ('C' in ticker or 'P' in ticker) and '/' in ticker:
-                # Stock options
                 if 'IS' in ticker and 'Equity' in ticker:
                     match = re.match(r'([A-Z]+)\s+IS\s+(\d{2})/(\d{2})/(\d{2})\s+([CP])(\d+)\s+Equity', ticker)
                     if match:
@@ -367,7 +319,6 @@ class TradePositionReconciler:
                             'strike': strike
                         }
                 
-                # Index options
                 elif 'Index' in ticker:
                     match = re.match(r'([A-Z]+)\s+(\d{2})/(\d{2})/(\d{2})\s+([CP])(\d+)\s+Index', ticker)
                     if match:
@@ -403,10 +354,8 @@ class TradePositionReconciler:
         """Calculate expiry date (last Thursday of month typically)"""
         import calendar
         
-        # Get last day of month
         last_day = calendar.monthrange(year, month)[1]
         
-        # Find last Thursday
         for day in range(last_day, 0, -1):
             date_obj = datetime(year, month, day)
             if date_obj.weekday() == 3:  # Thursday
@@ -418,15 +367,12 @@ class TradePositionReconciler:
                                   security_type: str, strike: float) -> str:
         """Generate Bloomberg ticker format"""
         
-        # Month codes for futures
         MONTH_CODE = {
             1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
             7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
         }
         
         ticker_upper = ticker.upper()
-        
-        # Check if this is an index
         is_index = ticker_upper in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NZ', 'NBZ', 'NF', 'NBF']
         
         if security_type == 'Futures':
@@ -438,7 +384,6 @@ class TradePositionReconciler:
             else:
                 return f"{ticker}={month_code}{year_code} IS Equity"
         else:
-            # Options
             date_str = expiry.strftime('%m/%d/%y')
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
             
@@ -466,7 +411,6 @@ class TradePositionReconciler:
                          trade_positions: List[TradePosition]) -> pd.DataFrame:
         """Combine beginning positions with trades to get post-trade positions"""
         
-        # Convert beginning positions to dictionary for easier lookup
         position_dict = {}
         
         for _, row in beginning_df.iterrows():
@@ -474,7 +418,7 @@ class TradePositionReconciler:
                 str(row['Symbol']),
                 pd.to_datetime(row['Expiry']).strftime('%Y-%m-%d'),
                 str(row['Type']),
-                float(row['Strike']) if pd.notna(row['Strike']) else 0
+                float(row['Strike']) if pd.notna(row['Strike']) and str(row['Strike']).strip() else 0
             )
             
             position_dict[key] = {
@@ -483,11 +427,10 @@ class TradePositionReconciler:
                 'expiry': pd.to_datetime(row['Expiry']),
                 'position': float(row['Position']),
                 'type': row['Type'],
-                'strike': float(row['Strike']) if pd.notna(row['Strike']) else 0,
+                'strike': float(row['Strike']) if pd.notna(row['Strike']) and str(row['Strike']).strip() else 0,
                 'lot_size': int(row['Lot Size']) if pd.notna(row['Lot Size']) else 1
             }
         
-        # Apply trades
         for trade in trade_positions:
             key = (
                 trade.bloomberg_ticker,
@@ -497,10 +440,8 @@ class TradePositionReconciler:
             )
             
             if key in position_dict:
-                # Update existing position
                 position_dict[key]['position'] += trade.position_change
             else:
-                # New position from trade
                 position_dict[key] = {
                     'underlying': trade.underlying_ticker,
                     'symbol': trade.bloomberg_ticker,
@@ -511,10 +452,8 @@ class TradePositionReconciler:
                     'lot_size': trade.lot_size
                 }
         
-        # Convert back to DataFrame
         post_trade_data = []
         for key, pos in position_dict.items():
-            # Include all positions (even zeros if needed)
             post_trade_data.append({
                 'Underlying': pos['underlying'],
                 'Symbol': pos['symbol'],
@@ -527,7 +466,6 @@ class TradePositionReconciler:
         
         post_trade_df = pd.DataFrame(post_trade_data)
         
-        # Sort by underlying, expiry, strike
         if not post_trade_df.empty:
             post_trade_df = post_trade_df.sort_values(
                 by=['Underlying', 'Expiry', 'Strike'],
@@ -535,13 +473,13 @@ class TradePositionReconciler:
             )
         
         return post_trade_df
-                             def generate_post_trade_report(self, beginning_file: str, trade_file: str, 
+    
+    def generate_post_trade_report(self, beginning_file: str, trade_file: str, 
                                   output_file: str, trade_format: str = 'MS'):
         """Main method to generate complete post-trade report"""
         
         logger.info("Starting post-trade position reconciliation...")
         
-        # Step 1: Read beginning positions
         logger.info("Reading beginning positions...")
         beginning_df = self.read_beginning_positions(beginning_file)
         
@@ -551,7 +489,6 @@ class TradePositionReconciler:
         
         logger.info(f"Found {len(beginning_df)} beginning positions")
         
-        # Step 2: Parse trade file
         logger.info(f"Parsing {trade_format} trade file...")
         
         if trade_format == 'MS':
@@ -564,16 +501,13 @@ class TradePositionReconciler:
         
         logger.info(f"Parsed {len(trade_positions)} trades")
         
-        # Step 3: Combine positions
         logger.info("Combining positions...")
         post_trade_df = self.combine_positions(beginning_df, trade_positions)
         
         logger.info(f"Post-trade positions: {len(post_trade_df)}")
         
-        # Step 4: Convert to Position objects for report generation
         positions = []
         for _, row in post_trade_df.iterrows():
-            # Only add non-zero positions for report
             if row['Position'] != 0:
                 pos = Position(
                     underlying_ticker=row['Underlying'],
@@ -587,11 +521,9 @@ class TradePositionReconciler:
                 )
                 positions.append(pos)
         
-        # Step 5: Fetch prices
         logger.info("Fetching current prices...")
         price_fetcher = PriceFetcher()
         
-        # Get symbols from both pre and post positions
         all_symbols = set()
         for _, row in beginning_df.iterrows():
             symbol = str(row['Symbol']).split()[0] if ' ' in str(row['Symbol']) else row['Symbol']
@@ -601,7 +533,6 @@ class TradePositionReconciler:
         
         prices = price_fetcher.fetch_prices_for_symbols(list(all_symbols))
         
-        # Step 6: Create enhanced Excel report
         logger.info("Creating post-trade Excel report...")
         self._create_enhanced_report(
             output_file, beginning_df, trade_positions, 
@@ -611,156 +542,130 @@ class TradePositionReconciler:
         logger.info(f"Post-trade report saved: {output_file}")
         return True
     
-   def _create_enhanced_report(self, output_file: str, beginning_df: pd.DataFrame,
-                           trade_positions: List[TradePosition], 
-                           post_trade_df: pd.DataFrame,
-                           positions: List[Position], 
-                           prices: Dict[str, float]):
-    """Create Excel report with complete pre and post trade positions"""
-    
-    import os
-    from copy import copy
-    
-    # Create a new workbook
-    wb = Workbook()
-    wb.remove(wb.active)
-    
-    # Define styles
-    header_font = Font(bold=True, size=11)
-    header_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
-    summary_header_fill = PatternFill(start_color="FFD700", end_color="FFD700", fill_type="solid")
-    trade_header_fill = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")
-    border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
-    
-    # ============= 1. SUMMARY SHEET =============
-    ws_summary = wb.create_sheet("Summary", 0)
-    ws_summary.cell(1, 1, "TRADE RECONCILIATION SUMMARY").font = Font(bold=True, size=14)
-    ws_summary.cell(3, 1, "Report Generated:").font = Font(bold=True)
-    ws_summary.cell(3, 2, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    
-    # Summary statistics
-    ws_summary.cell(5, 1, "POSITION SUMMARY").font = Font(bold=True, size=12)
-    
-    summary_data = [
-        ("Pre-Trade Positions Count", len(beginning_df)),
-        ("Trades Executed", len(trade_positions)),
-        ("Post-Trade Positions Count", len([r for _, r in post_trade_df.iterrows() if r['Position'] != 0]))
-    ]
-    
-    row = 6
-    for label, value in summary_data:
-        ws_summary.cell(row, 1, label).font = Font(bold=True)
-        ws_summary.cell(row, 2, value)
-        row += 1
-    
-    # ============= 2. TRADES SHEET =============
-    ws_trades = wb.create_sheet("Trades")
-    ws_trades.cell(1, 1, "INTRADAY TRADES").font = Font(bold=True, size=12)
-    
-    trade_headers = ['Trade #', 'Underlying', 'Symbol', 'Expiry', 'Type', 'Strike', 'Side', 'Quantity', 'Price']
-    
-    for col, header in enumerate(trade_headers, 1):
-        cell = ws_trades.cell(3, col, header)
-        cell.font = header_font
-        cell.fill = trade_header_fill
-        cell.border = border
-    
-    row = 4
-    for idx, trade in enumerate(trade_positions, 1):
-        ws_trades.cell(row, 1, idx).border = border
-        ws_trades.cell(row, 2, trade.underlying_ticker).border = border
-        ws_trades.cell(row, 3, trade.symbol).border = border
-        ws_trades.cell(row, 4, trade.expiry_date.strftime('%Y-%m-%d')).border = border
-        ws_trades.cell(row, 5, trade.security_type).border = border
-        ws_trades.cell(row, 6, trade.strike_price if trade.strike_price > 0 else '').border = border
-        ws_trades.cell(row, 7, trade.trade_type).border = border
-        ws_trades.cell(row, 8, abs(trade.position_change)).border = border
-        ws_trades.cell(row, 9, trade.trade_price).border = border
-        row += 1
-    
-    # ============= 3. PRE-TRADE POSITIONS =============
-    # Convert beginning positions to Position objects
-    pre_positions = []
-    for _, row in beginning_df.iterrows():
-        pos = Position(
-            underlying_ticker=row['Underlying'],
-            bloomberg_ticker=row['Symbol'],
-            symbol=str(row['Symbol']).split()[0] if ' ' in str(row['Symbol']) else row['Symbol'],
-            expiry_date=pd.to_datetime(row['Expiry']),
-            position_lots=float(row['Position']),
-            security_type=row['Type'],
-            strike_price=float(row['Strike']) if row.get('Strike') and str(row['Strike']).strip() else 0,
-            lot_size=int(row['Lot Size']) if row.get('Lot Size') else 1
+    def _create_enhanced_report(self, output_file: str, beginning_df: pd.DataFrame,
+                               trade_positions: List[TradePosition], 
+                               post_trade_df: pd.DataFrame,
+                               positions: List[Position], 
+                               prices: Dict[str, float]):
+        """Create Excel report with complete pre and post trade positions"""
+        
+        # Create main workbook
+        wb = Workbook()
+        wb.remove(wb.active)
+        
+        # Define styles
+        header_font = Font(bold=True, size=11)
+        header_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+        border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
         )
-        pre_positions.append(pos)
+        
+        # 1. Summary Sheet
+        ws_summary = wb.create_sheet("Summary")
+        ws_summary.cell(1, 1, "TRADE RECONCILIATION").font = Font(bold=True, size=14)
+        ws_summary.cell(3, 1, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        ws_summary.cell(5, 1, f"Pre-Trade Positions: {len(beginning_df)}")
+        ws_summary.cell(6, 1, f"Trades Executed: {len(trade_positions)}")
+        ws_summary.cell(7, 1, f"Post-Trade Positions: {len([r for _, r in post_trade_df.iterrows() if r['Position'] != 0])}")
+        
+        # 2. Trades Sheet
+        ws_trades = wb.create_sheet("Trades")
+        trade_headers = ['#', 'Underlying', 'Symbol', 'Expiry', 'Type', 'Strike', 'Side', 'Qty', 'Price']
+        for col, header in enumerate(trade_headers, 1):
+            ws_trades.cell(1, col, header).font = header_font
+            ws_trades.cell(1, col).fill = header_fill
+            ws_trades.cell(1, col).border = border
+        
+        for idx, trade in enumerate(trade_positions, 2):
+            ws_trades.cell(idx, 1, idx-1)
+            ws_trades.cell(idx, 2, trade.underlying_ticker)
+            ws_trades.cell(idx, 3, trade.symbol)
+            ws_trades.cell(idx, 4, trade.expiry_date.strftime('%Y-%m-%d'))
+            ws_trades.cell(idx, 5, trade.security_type)
+            ws_trades.cell(idx, 6, trade.strike_price if trade.strike_price > 0 else '')
+            ws_trades.cell(idx, 7, trade.trade_type)
+            ws_trades.cell(idx, 8, abs(trade.position_change))
+            ws_trades.cell(idx, 9, trade.trade_price)
+        
+        # 3. Pre-Trade Positions
+        pre_positions = []
+        for _, row in beginning_df.iterrows():
+            pos = Position(
+                underlying_ticker=row['Underlying'],
+                bloomberg_ticker=row['Symbol'],
+                symbol=str(row['Symbol']).split()[0] if ' ' in str(row['Symbol']) else row['Symbol'],
+                expiry_date=pd.to_datetime(row['Expiry']),
+                position_lots=float(row['Position']),
+                security_type=row['Type'],
+                strike_price=float(row['Strike']) if row.get('Strike') and str(row['Strike']).strip() else 0,
+                lot_size=int(row['Lot Size']) if row.get('Lot Size') else 1
+            )
+            pre_positions.append(pos)
+        
+        # Generate pre-trade sheets in temp file
+        temp_pre = f"temp_pre_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        pre_writer = ExcelWriter(temp_pre, self.usdinr_rate)
+        pre_writer.create_report(pre_positions, prices, [])
+        
+        # Copy pre-trade sheets
+        pre_wb = load_workbook(temp_pre)
+        for sheet_name in pre_wb.sheetnames:
+            if 'Unmapped' not in sheet_name:
+                source = pre_wb[sheet_name]
+                new_name = f"PreTrade_{sheet_name}"[:31]  # Excel sheet name limit
+                target = wb.create_sheet(new_name)
+                
+                for row in source.iter_rows(values_only=True):
+                    target.append(row)
+                
+                # Copy column widths
+                for col in source.column_dimensions:
+                    target.column_dimensions[col].width = source.column_dimensions[col].width
+        
+        pre_wb.close()
+        os.remove(temp_pre)
+        
+        # 4. Post-Trade Positions
+        temp_post = f"temp_post_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        post_writer = ExcelWriter(temp_post, self.usdinr_rate)
+        post_writer.create_report(positions, prices, [])
+        
+        # Copy post-trade sheets
+        post_wb = load_workbook(temp_post)
+        for sheet_name in post_wb.sheetnames:
+            if 'Unmapped' not in sheet_name:
+                source = post_wb[sheet_name]
+                new_name = f"PostTrade_{sheet_name}"[:31]
+                target = wb.create_sheet(new_name)
+                
+                for row in source.iter_rows(values_only=True):
+                    target.append(row)
+                
+                for col in source.column_dimensions:
+                    target.column_dimensions[col].width = source.column_dimensions[col].width
+        
+        post_wb.close()
+        os.remove(temp_post)
+        
+        # Save final report
+        wb.save(output_file)
+        logger.info(f"Report saved: {output_file}")
     
-    # Create Pre-Trade All Positions
-    ws_pre_all = wb.create_sheet("PreTrade_All_Positions")
-    self._write_positions_sheet(ws_pre_all, beginning_df, header_font, header_fill, border)
-    
-    # Generate pre-trade report in temp file
-    temp_pre = "temp_pre.xlsx"
-    pre_writer = ExcelWriter(temp_pre, self.usdinr_rate)
-    pre_writer.create_report(pre_positions, prices, [])
-    
-    # Load pre-trade workbook and copy sheets
-    pre_wb = load_workbook(temp_pre)
-    for sheet_name in pre_wb.sheetnames:
-        if sheet_name not in ['All_Positions', 'Unmapped_Symbols']:
-            source = pre_wb[sheet_name]
-            new_name = f"PreTrade_{sheet_name}"
-            target = wb.create_sheet(new_name)
-            
-            # Copy data
-            for row in source.iter_rows():
-                for cell in row:
-                    target.cell(row=cell.row, column=cell.column, value=cell.value)
-                    if cell.has_style:
-                        target.cell(row=cell.row, column=cell.column).font = copy(cell.font)
-                        target.cell(row=cell.row, column=cell.column).fill = copy(cell.fill)
-                        target.cell(row=cell.row, column=cell.column).border = copy(cell.border)
-                        target.cell(row=cell.row, column=cell.column).number_format = cell.number_format
-    
-    pre_wb.close()
-    os.remove(temp_pre)
-    
-    # ============= 4. POST-TRADE POSITIONS =============
-    # Create Post-Trade All Positions
-    ws_post_all = wb.create_sheet("PostTrade_All_Positions")
-    post_trade_non_zero = post_trade_df[post_trade_df['Position'] != 0].copy()
-    self._write_positions_sheet(ws_post_all, post_trade_non_zero, header_font, header_fill, border)
-    
-    # Generate post-trade report in temp file
-    temp_post = "temp_post.xlsx"
-    post_writer = ExcelWriter(temp_post, self.usdinr_rate)
-    post_writer.create_report(positions, prices, [])
-    
-    # Load post-trade workbook and copy sheets
-    post_wb = load_workbook(temp_post)
-    for sheet_name in post_wb.sheetnames:
-        if sheet_name not in ['All_Positions', 'Unmapped_Symbols']:
-            source = post_wb[sheet_name]
-            new_name = f"PostTrade_{sheet_name}"
-            target = wb.create_sheet(new_name)
-            
-            # Copy data
-            for row in source.iter_rows():
-                for cell in row:
-                    target.cell(row=cell.row, column=cell.column, value=cell.value)
-                    if cell.has_style:
-                        target.cell(row=cell.row, column=cell.column).font = copy(cell.font)
-                        target.cell(row=cell.row, column=cell.column).fill = copy(cell.fill)
-                        target.cell(row=cell.row, column=cell.column).border = copy(cell.border)
-                        target.cell(row=cell.row, column=cell.column).number_format = cell.number_format
-    
-    post_wb.close()
-    os.remove(temp_post)
-    
-    # Save final workbook
-    wb.save(output_file)
-    logger.info(f"Complete report saved: {output_file}")
+    def _write_positions_sheet(self, ws, df, header_font, header_fill, border):
+        """Helper to write positions data to worksheet"""
+        headers = ['Underlying', 'Symbol', 'Expiry', 'Position', 'Type', 'Strike', 'Lot Size']
+        
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(1, col, header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = border
+        
+        for row_idx, (_, row) in enumerate(df.iterrows(), 2):
+            for col_idx, header in enumerate(headers, 1):
+                value = row.get(header, '')
+                cell = ws.cell(row_idx, col_idx, value)
+                cell.border = border

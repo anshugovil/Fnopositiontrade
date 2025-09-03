@@ -572,8 +572,49 @@ class StreamlitDeliveryApp:
             st.info("📤 Please upload and process a position file first")
             return
         
-        positions = st.session_state.positions
+        # If we have trades, show both initial and final positions
+        if st.session_state.has_trades and st.session_state.final_positions:
+            position_view = st.radio(
+                "Select positions to view:",
+                ["Initial Positions", "Final Positions (After Trades)", "Compare Both"]
+            )
+            
+            if position_view == "Initial Positions":
+                self._display_positions_section("Initial Positions", st.session_state.positions)
+            elif position_view == "Final Positions (After Trades)":
+                self._display_positions_section("Final Positions (After Trades)", st.session_state.final_positions)
+            else:
+                # Compare both
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("### Initial Positions")
+                    self._display_positions_metrics(st.session_state.positions)
+                with col2:
+                    st.markdown("### Final Positions")
+                    self._display_positions_metrics(st.session_state.final_positions)
+                
+                # Show detailed comparison
+                st.subheader("📋 Position Comparison")
+                comparison_data = self._create_comparison_data(
+                    st.session_state.positions, 
+                    st.session_state.final_positions
+                )
+                if comparison_data:
+                    comp_df = pd.DataFrame(comparison_data)
+                    st.dataframe(comp_df, use_container_width=True, hide_index=True)
+        else:
+            # No trades, just show initial positions
+            self._display_positions_section("Initial Positions", st.session_state.positions)
         
+        # Unmapped symbols warning
+        if st.session_state.unmapped_symbols:
+            st.warning(f"⚠️ {len(st.session_state.unmapped_symbols)} unmapped symbols found")
+            with st.expander("View Unmapped Symbols"):
+                unmapped_df = pd.DataFrame(st.session_state.unmapped_symbols)
+                st.dataframe(unmapped_df, use_container_width=True, hide_index=True)
+    
+    def _display_positions_section(self, title, positions):
+        """Display a positions section with metrics and details"""
         # Summary metrics
         col1, col2, col3, col4 = st.columns(4)
         
@@ -594,7 +635,7 @@ class StreamlitDeliveryApp:
             st.metric("Futures/Options", f"{futures_count}/{options_count}")
         
         # Detailed positions table
-        st.subheader("📋 Position Details")
+        st.subheader(f"📋 {title} Details")
         
         df_data = []
         for p in positions:
@@ -611,14 +652,66 @@ class StreamlitDeliveryApp:
         
         if df_data:
             df = pd.DataFrame(df_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            # Highlight closed positions (0 lots) if this is final positions
+            if "Final" in title:
+                styled_df = df.style.apply(
+                    lambda x: ['background-color: #ffe6e6' if x['Position (Lots)'] == 0 else '' for _ in x],
+                    axis=1
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(df, use_container_width=True, hide_index=True)
+    
+    def _display_positions_metrics(self, positions):
+        """Display just the metrics for positions"""
+        st.metric("Total", len(positions))
+        st.metric("Underlyings", len(set(p.underlying_ticker for p in positions)))
+        st.metric("Expiries", len(set(p.expiry_date for p in positions)))
+        futures = sum(1 for p in positions if p.is_future)
+        st.metric("Fut/Opt", f"{futures}/{len(positions)-futures}")
+    
+    def _create_comparison_data(self, initial_positions, final_positions):
+        """Create comparison data between initial and final positions"""
+        # Create a map of positions
+        position_map = {}
         
-        # Unmapped symbols warning
-        if st.session_state.unmapped_symbols:
-            st.warning(f"⚠️ {len(st.session_state.unmapped_symbols)} unmapped symbols found")
-            with st.expander("View Unmapped Symbols"):
-                unmapped_df = pd.DataFrame(st.session_state.unmapped_symbols)
-                st.dataframe(unmapped_df, use_container_width=True, hide_index=True)
+        # Add initial positions
+        for pos in initial_positions:
+            key = (pos.underlying_ticker, pos.bloomberg_ticker, pos.expiry_date, pos.security_type, pos.strike_price)
+            position_map[key] = {
+                'Underlying': pos.underlying_ticker,
+                'Symbol': pos.symbol,
+                'Expiry': pos.expiry_date.strftime('%Y-%m-%d'),
+                'Type': pos.security_type,
+                'Strike': pos.strike_price if pos.strike_price > 0 else '',
+                'Initial': pos.position_lots,
+                'Final': 0,
+                'Change': 0
+            }
+        
+        # Add final positions
+        for pos in final_positions:
+            key = (pos.underlying_ticker, pos.bloomberg_ticker, pos.expiry_date, pos.security_type, pos.strike_price)
+            if key in position_map:
+                position_map[key]['Final'] = pos.position_lots
+                position_map[key]['Change'] = pos.position_lots - position_map[key]['Initial']
+            else:
+                position_map[key] = {
+                    'Underlying': pos.underlying_ticker,
+                    'Symbol': pos.symbol,
+                    'Expiry': pos.expiry_date.strftime('%Y-%m-%d'),
+                    'Type': pos.security_type,
+                    'Strike': pos.strike_price if pos.strike_price > 0 else '',
+                    'Initial': 0,
+                    'Final': pos.position_lots,
+                    'Change': pos.position_lots
+                }
+        
+        # Convert to list and sort
+        comparison_data = list(position_map.values())
+        comparison_data.sort(key=lambda x: (x['Underlying'], x['Expiry'], x['Strike']))
+        
+        return comparison_data
     
     def reconciliation_tab(self):
         """Display reconciliation results"""

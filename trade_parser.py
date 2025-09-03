@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import re
 import logging
-from dataclasses import dataclass
 from input_parser import Position, MONTH_CODE
 
 logger = logging.getLogger(__name__)

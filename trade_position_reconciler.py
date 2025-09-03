@@ -83,6 +83,127 @@ class TradePositionReconciler:
         
         return mappings
     
+    def parse_ms_raw_trade_file(self, trade_file_path: str) -> List[TradePosition]:
+        """Parse raw MS format trade file (the input to WAFRA transformer)"""
+        trade_positions = []
+        
+        try:
+            # Read the MS input CSV
+            df = pd.read_csv(trade_file_path, header=None)
+            logger.info(f"Read MS file with {len(df)} rows and {len(df.columns)} columns")
+            
+            # MS format columns:
+            # Col 4: Instrument (OPTSTK, FUTSTK, OPTIDX, FUTIDX)
+            # Col 5: Symbol
+            # Col 6: Expiry
+            # Col 7: Lot Size
+            # Col 8: Strike
+            # Col 9: Option Type (CE/PE)
+            # Col 10: Side (B/S)
+            # Col 12: Quantity
+            # Col 13: Price
+            
+            for idx, row in df.iterrows():
+                try:
+                    # Skip header rows or invalid data
+                    if len(row) < 14:
+                        continue
+                    
+                    # Get instrument type
+                    instrument = str(row[4]).upper() if pd.notna(row[4]) else ""
+                    if instrument not in ['OPTSTK', 'FUTSTK', 'OPTIDX', 'FUTIDX']:
+                        continue
+                    
+                    # Parse fields
+                    symbol = str(row[5]).strip().upper() if pd.notna(row[5]) else ""
+                    if not symbol:
+                        continue
+                    
+                    expiry_str = str(row[6]).strip() if pd.notna(row[6]) else ""
+                    strike = float(row[8]) if pd.notna(row[8]) else 0.0
+                    option_type = str(row[9]).strip().upper() if pd.notna(row[9]) else ""
+                    side = str(row[10]).strip().upper() if pd.notna(row[10]) else ""
+                    qty = float(row[12]) if pd.notna(row[12]) else 0.0
+                    price = float(row[13]) if pd.notna(row[13]) else 0.0
+                    lot_size = int(float(row[7])) if pd.notna(row[7]) else 1
+                    
+                    # Skip zero quantity
+                    if qty == 0:
+                        continue
+                    
+                    # Parse expiry date
+                    expiry = self._parse_date_flexible(expiry_str)
+                    if not expiry:
+                        logger.warning(f"Could not parse expiry date: {expiry_str}")
+                        continue
+                    
+                    # Determine security type
+                    if 'FUT' in instrument:
+                        security_type = 'Futures'
+                    elif option_type in ['CE', 'C']:
+                        security_type = 'Call'
+                    elif option_type in ['PE', 'P']:
+                        security_type = 'Put'
+                    else:
+                        continue
+                    
+                    # Determine position change (Buy = positive, Sell = negative)
+                    if side.startswith('B'):
+                        position_change = qty
+                        trade_type = 'BUY'
+                    elif side.startswith('S'):
+                        position_change = -qty
+                        trade_type = 'SELL'
+                    else:
+                        continue
+                    
+                    # Get mapping for underlying and ticker
+                    mapping = self.symbol_mappings.get(symbol, {})
+                    if not mapping:
+                        # Use defaults if not mapped
+                        if symbol in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
+                            underlying = f"{symbol} INDEX"
+                            ticker = symbol
+                        else:
+                            underlying = f"{symbol} IS Equity"
+                            ticker = symbol
+                    else:
+                        underlying = mapping.get('underlying', f"{symbol} IS Equity")
+                        ticker = mapping.get('ticker', symbol)
+                    
+                    # Generate Bloomberg ticker
+                    bloomberg_ticker = self._generate_bloomberg_ticker(
+                        ticker, expiry, security_type, strike
+                    )
+                    
+                    # Create TradePosition
+                    trade_pos = TradePosition(
+                        underlying_ticker=underlying,
+                        bloomberg_ticker=bloomberg_ticker,
+                        symbol=symbol,
+                        expiry_date=expiry,
+                        position_change=position_change,
+                        security_type=security_type,
+                        strike_price=strike,
+                        lot_size=lot_size,
+                        trade_price=price,
+                        trade_type=trade_type
+                    )
+                    
+                    trade_positions.append(trade_pos)
+                    logger.debug(f"Added trade: {symbol} {expiry_str} {security_type} {strike} {trade_type} {qty}")
+                    
+                except Exception as e:
+                    logger.debug(f"Error parsing row {idx}: {e}")
+                    continue
+            
+            logger.info(f"Successfully parsed {len(trade_positions)} trades from MS file")
+            return trade_positions
+            
+        except Exception as e:
+            logger.error(f"Error reading MS trade file: {e}")
+            return []
+    
     def parse_wafra_trade_file(self, trade_file_path: str) -> List[TradePosition]:
         """Parse WAFRA format trade file and convert to position changes"""
         trade_positions = []
@@ -138,11 +259,34 @@ class TradePositionReconciler:
         
         return trade_positions
     
-    def parse_gs_trade_file(self, trade_file_path: str) -> List[TradePosition]:
-        """Parse GS format trade file (if different from beginning positions format)"""
-        # This would use similar logic to parse_wafra_trade_file but for GS format
-        # For now, assuming GS trades come in same format as beginning positions
-        pass
+    def _parse_date_flexible(self, date_str: str) -> Optional[datetime]:
+        """Parse date string in various formats"""
+        date_str = str(date_str).strip()
+        
+        # Try multiple date formats
+        formats = [
+            "%d-%b-%Y",  # 27-Mar-2025
+            "%d/%m/%Y",  # 27/03/2025
+            "%d/%m/%y",  # 27/03/25
+            "%Y-%m-%d",  # 2025-03-27
+            "%d-%m-%Y",  # 27-03-2025
+            "%d.%m.%Y",  # 27.03.2025
+            "%d%b%Y",    # 27Mar2025
+            "%d-%b-%y",  # 27-Mar-25
+            "%d %b %Y",  # 27 Mar 2025
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except:
+                continue
+        
+        # Try pandas parser as fallback
+        try:
+            return pd.to_datetime(date_str, dayfirst=True)
+        except:
+            return None
     
     def _parse_bloomberg_ticker(self, ticker: str) -> Optional[Dict]:
         """Parse Bloomberg ticker to extract position details"""
@@ -150,7 +294,6 @@ class TradePositionReconciler:
             ticker = ticker.strip()
             
             # Futures pattern: SYMBOL=MY IS Equity or SYMBOLMY Index
-            # Stock futures: RIL=H5 IS Equity
             if '=' in ticker and 'IS Equity' in ticker:
                 match = re.match(r'([A-Z]+)=([A-Z])(\d)\s+IS\s+Equity', ticker)
                 if match:
@@ -158,12 +301,10 @@ class TradePositionReconciler:
                     month_code = match.group(2)
                     year = match.group(3)
                     
-                    # Convert month code to month number
                     month_map = {'F':1,'G':2,'H':3,'J':4,'K':5,'M':6,
                                 'N':7,'Q':8,'U':9,'V':10,'X':11,'Z':12}
                     month = month_map.get(month_code, 1)
                     
-                    # Calculate expiry (last Thursday of month typically)
                     year_full = 2020 + int(year)
                     expiry = self._get_expiry_date(year_full, month)
                     
@@ -178,7 +319,7 @@ class TradePositionReconciler:
                     }
             
             # Index futures: NIFTYU5 Index
-            elif 'Index' in ticker and '=' not in ticker:
+            elif 'Index' in ticker and '=' not in ticker and not ('/' in ticker):
                 match = re.match(r'([A-Z]+)([A-Z])(\d)\s+Index', ticker)
                 if match:
                     symbol = match.group(1)
@@ -200,8 +341,7 @@ class TradePositionReconciler:
                         'strike': 0
                     }
             
-            # Options pattern: SYMBOL IS MM/DD/YY C/P12345 Equity
-            # or SYMBOL MM/DD/YY C/P12345 Index
+            # Options pattern
             elif ('C' in ticker or 'P' in ticker) and '/' in ticker:
                 # Stock options
                 if 'IS' in ticker and 'Equity' in ticker:
@@ -272,11 +412,49 @@ class TradePositionReconciler:
         
         return datetime(year, month, last_day)
     
+    def _generate_bloomberg_ticker(self, ticker: str, expiry: datetime,
+                                  security_type: str, strike: float) -> str:
+        """Generate Bloomberg ticker format"""
+        
+        # Month codes for futures
+        MONTH_CODE = {
+            1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+            7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
+        }
+        
+        ticker_upper = ticker.upper()
+        
+        # Check if this is an index
+        is_index = ticker_upper in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NZ', 'NBZ', 'NF', 'NBF']
+        
+        if security_type == 'Futures':
+            month_code = MONTH_CODE.get(expiry.month, "")
+            year_code = str(expiry.year)[-1]
+            
+            if is_index:
+                return f"{ticker}{month_code}{year_code} Index"
+            else:
+                return f"{ticker}={month_code}{year_code} IS Equity"
+        else:
+            # Options
+            date_str = expiry.strftime('%m/%d/%y')
+            strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+            
+            if is_index:
+                if security_type == 'Call':
+                    return f"{ticker} {date_str} C{strike_str} Index"
+                else:
+                    return f"{ticker} {date_str} P{strike_str} Index"
+            else:
+                if security_type == 'Call':
+                    return f"{ticker} IS {date_str} C{strike_str} Equity"
+                else:
+                    return f"{ticker} IS {date_str} P{strike_str} Equity"
+    
     def read_beginning_positions(self, excel_file: str) -> pd.DataFrame:
         """Read All_Positions sheet from beginning positions file"""
         try:
             df = pd.read_excel(excel_file, sheet_name='All_Positions')
-            # Expected columns: Underlying, Symbol, Expiry, Position, Type, Strike, Lot Size
             return df
         except Exception as e:
             logger.error(f"Error reading beginning positions: {e}")
@@ -287,7 +465,6 @@ class TradePositionReconciler:
         """Combine beginning positions with trades to get post-trade positions"""
         
         # Convert beginning positions to dictionary for easier lookup
-        # Key: (symbol, expiry, type, strike)
         position_dict = {}
         
         for _, row in beginning_df.iterrows():
@@ -311,7 +488,7 @@ class TradePositionReconciler:
         # Apply trades
         for trade in trade_positions:
             key = (
-                trade.bloomberg_ticker,  # Use bloomberg ticker as symbol
+                trade.bloomberg_ticker,
                 trade.expiry_date.strftime('%Y-%m-%d'),
                 trade.security_type,
                 trade.strike_price
@@ -359,7 +536,7 @@ class TradePositionReconciler:
         return post_trade_df
     
     def generate_post_trade_report(self, beginning_file: str, trade_file: str, 
-                                  output_file: str, trade_format: str = 'WAFRA'):
+                                  output_file: str, trade_format: str = 'MS'):
         """Main method to generate complete post-trade report"""
         
         logger.info("Starting post-trade position reconciliation...")
@@ -377,10 +554,11 @@ class TradePositionReconciler:
         # Step 2: Parse trade file
         logger.info(f"Parsing {trade_format} trade file...")
         
-        if trade_format == 'WAFRA':
+        if trade_format == 'MS':
+            trade_positions = self.parse_ms_raw_trade_file(trade_file)
+        elif trade_format == 'WAFRA':
             trade_positions = self.parse_wafra_trade_file(trade_file)
         else:
-            # Add GS format parsing if needed
             logger.error(f"Unsupported trade format: {trade_format}")
             return False
         
@@ -398,7 +576,7 @@ class TradePositionReconciler:
             pos = Position(
                 underlying_ticker=row['Underlying'],
                 bloomberg_ticker=row['Symbol'],
-                symbol=row['Symbol'].split()[0],  # Extract base symbol
+                symbol=row['Symbol'].split()[0],
                 expiry_date=pd.to_datetime(row['Expiry']),
                 position_lots=row['Position'],
                 security_type=row['Type'],
@@ -431,7 +609,7 @@ class TradePositionReconciler:
         """Create Excel report with both pre and post trade positions"""
         
         wb = Workbook()
-        wb.remove(wb.active)  # Remove default sheet
+        wb.remove(wb.active)
         
         # Define styles
         header_font = Font(bold=True, size=11)
@@ -493,8 +671,6 @@ class TradePositionReconciler:
         
         # 5. Use existing ExcelWriter for delivery and IV sheets
         writer = ExcelWriter(output_file, self.usdinr_rate)
-        
-        # We need to add our custom sheets to the writer's workbook
         writer.wb = wb
         
         # Generate post-trade delivery and IV sheets
@@ -570,24 +746,3 @@ class TradePositionReconciler:
         ws.column_dimensions['G'].width = 12
         ws.column_dimensions['H'].width = 10
         ws.column_dimensions['I'].width = 15
-
-
-# Example usage
-if __name__ == "__main__":
-    reconciler = TradePositionReconciler(
-        mapping_file="futures mapping.csv",
-        usdinr_rate=88.0
-    )
-    
-    # Generate post-trade report
-    success = reconciler.generate_post_trade_report(
-        beginning_file="GS_AURIGIN_DELIVERY_20250101.xlsx",  # Output from first project
-        trade_file="wafra_option_trades_20250101.csv",  # Output from WAFRA transformer
-        output_file="POST_TRADE_DELIVERY_20250101.xlsx",
-        trade_format="WAFRA"
-    )
-    
-    if success:
-        print("Post-trade report generated successfully!")
-    else:
-        print("Failed to generate post-trade report")

@@ -620,6 +620,115 @@ class StreamlitDeliveryApp:
                 unmapped_df = pd.DataFrame(st.session_state.unmapped_symbols)
                 st.dataframe(unmapped_df, use_container_width=True, hide_index=True)
     
+    def reconciliation_tab(self):
+        """Display reconciliation results"""
+        st.markdown('<h2 class="sub-header">Position Reconciliation</h2>', unsafe_allow_html=True)
+        
+        if not st.session_state.report_generated:
+            st.info("📤 Please process a position file first")
+            return
+        
+        if not st.session_state.recon_file:
+            st.info("📋 Upload a reconciliation file in the sidebar to compare positions")
+            st.write("The recon file should have two columns:")
+            st.write("- Column A: Symbol (Bloomberg Ticker)")
+            st.write("- Column B: Position")
+            return
+        
+        if not st.session_state.recon_results:
+            if st.button("🔄 Run Reconciliation", type="primary"):
+                with st.spinner("Performing reconciliation..."):
+                    self.perform_reconciliation()
+        
+        if st.session_state.recon_results:
+            results = st.session_state.recon_results
+            
+            # Check if we have dual reconciliation
+            if st.session_state.has_trades and 'final' in results:
+                # Dual reconciliation display
+                st.subheader("📊 Dual Reconciliation Summary")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Initial Positions Reconciliation:**")
+                    initial_summary = results['initial']['summary']
+                    st.metric("Total Discrepancies", initial_summary['total_discrepancies'])
+                    st.write(f"- Matched: {initial_summary['matched_count']}")
+                    st.write(f"- Mismatches: {initial_summary['mismatch_count']}")
+                    st.write(f"- Missing in Recon: {initial_summary['missing_in_recon_count']}")
+                    st.write(f"- Missing in Delivery: {initial_summary['missing_in_delivery_count']}")
+                
+                with col2:
+                    st.write("**Final Positions Reconciliation:**")
+                    final_summary = results['final']['summary']
+                    st.metric("Total Discrepancies", final_summary['total_discrepancies'])
+                    st.write(f"- Matched: {final_summary['matched_count']}")
+                    st.write(f"- Mismatches: {final_summary['mismatch_count']}")
+                    st.write(f"- Missing in Recon: {final_summary['missing_in_recon_count']}")
+                    st.write(f"- Missing in Delivery: {final_summary['missing_in_delivery_count']}")
+                
+                # Select which reconciliation to view in detail
+                recon_view = st.radio(
+                    "View detailed reconciliation:",
+                    ["Initial Positions", "Final Positions"]
+                )
+                
+                if recon_view == "Initial Positions":
+                    display_results = results['initial']
+                else:
+                    display_results = results['final']
+            else:
+                # Single reconciliation display
+                st.subheader("📊 Reconciliation Summary")
+                display_results = results['initial']
+                summary = display_results['summary']
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Matched Positions", summary['matched_count'])
+                
+                with col2:
+                    st.metric("Position Mismatches", summary['mismatch_count'])
+                
+                with col3:
+                    st.metric("Missing in Recon", summary['missing_in_recon_count'])
+                
+                with col4:
+                    st.metric("Missing in Delivery", summary['missing_in_delivery_count'])
+                
+                # Show total discrepancies prominently
+                if summary['total_discrepancies'] > 0:
+                    st.error(f"⚠️ Total Discrepancies: {summary['total_discrepancies']}")
+                else:
+                    st.success("✅ All positions match perfectly!")
+            
+            # Display detailed discrepancies
+            if display_results.get('position_mismatches'):
+                st.subheader("🔍 Position Mismatches")
+                mismatch_df = pd.DataFrame(display_results['position_mismatches'])
+                st.dataframe(
+                    mismatch_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        'Delivery_Position': st.column_config.NumberColumn(format="%.2f"),
+                        'Recon_Position': st.column_config.NumberColumn(format="%.2f"),
+                        'Difference': st.column_config.NumberColumn(format="%.2f"),
+                    }
+                )
+            
+            if display_results.get('missing_in_recon'):
+                st.subheader("📋 Missing in Recon File")
+                missing_recon_df = pd.DataFrame(display_results['missing_in_recon'])
+                st.dataframe(missing_recon_df, use_container_width=True, hide_index=True)
+            
+            if display_results.get('missing_in_delivery'):
+                st.subheader("📋 Missing in Delivery Output")
+                missing_delivery_df = pd.DataFrame(display_results['missing_in_delivery'])
+                st.dataframe(missing_delivery_df, use_container_width=True, hide_index=True)
+    
     def download_reports_tab(self):
         """Download generated reports"""
         st.markdown('<h2 class="sub-header">Download Reports</h2>', unsafe_allow_html=True)

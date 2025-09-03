@@ -683,7 +683,7 @@ class StreamlitDeliveryApp:
                 'Symbol': pos.symbol,
                 'Expiry': pos.expiry_date.strftime('%Y-%m-%d'),
                 'Type': pos.security_type,
-                'Strike': pos.strike_price if pos.strike_price > 0 else '',
+                'Strike': pos.strike_price if pos.strike_price > 0 else 0,  # Use 0 instead of empty string
                 'Initial': pos.position_lots,
                 'Final': 0,
                 'Change': 0
@@ -701,7 +701,7 @@ class StreamlitDeliveryApp:
                     'Symbol': pos.symbol,
                     'Expiry': pos.expiry_date.strftime('%Y-%m-%d'),
                     'Type': pos.security_type,
-                    'Strike': pos.strike_price if pos.strike_price > 0 else '',
+                    'Strike': pos.strike_price if pos.strike_price > 0 else 0,  # Use 0 instead of empty string
                     'Initial': 0,
                     'Final': pos.position_lots,
                     'Change': pos.position_lots
@@ -709,7 +709,13 @@ class StreamlitDeliveryApp:
         
         # Convert to list and sort
         comparison_data = list(position_map.values())
-        comparison_data.sort(key=lambda x: (x['Underlying'], x['Expiry'], x['Strike']))
+        # Sort with proper handling of Strike field
+        comparison_data.sort(key=lambda x: (x['Underlying'], x['Expiry'], float(x['Strike']) if x['Strike'] else 0))
+        
+        # Convert Strike back to display format (empty string for 0)
+        for item in comparison_data:
+            if item['Strike'] == 0:
+                item['Strike'] = ''
         
         return comparison_data
     

@@ -1,6 +1,7 @@
 """
 Trade Parser Module
 Handles parsing of GS and MS trade files and converts them to position format
+Updated: Handles NIFTY and BANKNIFTY futures vs options ticker mapping
 """
 
 import pandas as pd
@@ -42,6 +43,36 @@ class Position:
 MONTH_CODE = {
     1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
     7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
+}
+
+# Special index ticker mappings
+# For these symbols, futures and options use different Bloomberg tickers
+INDEX_TICKER_RULES = {
+    'NIFTY': {
+        'futures_ticker': 'NZ',
+        'options_ticker': 'NIFTY',
+        'underlying': 'NIFTY INDEX'
+    },
+    'NZ': {  # If NZ is used as symbol, treat it as NIFTY
+        'futures_ticker': 'NZ',
+        'options_ticker': 'NIFTY',
+        'underlying': 'NIFTY INDEX'
+    },
+    'BANKNIFTY': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'underlying': 'NSEBANK INDEX'
+    },
+    'AF': {  # If AF is used as symbol, treat it as BANKNIFTY
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'underlying': 'NSEBANK INDEX'
+    },
+    'NSEBANK': {  # Alternative symbol for BANKNIFTY
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'underlying': 'NSEBANK INDEX'
+    }
 }
 
 
@@ -106,6 +137,33 @@ class TradeParser:
             self.normalized_mappings = {}
             
         return mappings
+    
+    def _get_index_ticker(self, symbol: str, security_type: str) -> Optional[Dict]:
+        """
+        Get special ticker mapping for index futures vs options
+        Returns None if no special rule applies
+        """
+        symbol_upper = symbol.upper()
+        
+        # Check if this symbol has special index rules
+        if symbol_upper in INDEX_TICKER_RULES:
+            rule = INDEX_TICKER_RULES[symbol_upper]
+            
+            # Return appropriate ticker based on security type
+            if security_type == 'Futures':
+                return {
+                    'ticker': rule['futures_ticker'],
+                    'underlying': rule['underlying'],
+                    'lot_size': 50 if 'NIFTY' in symbol_upper else 15  # Default lot sizes
+                }
+            else:  # Options (Call or Put)
+                return {
+                    'ticker': rule['options_ticker'],
+                    'underlying': rule['underlying'],
+                    'lot_size': 50 if 'NIFTY' in symbol_upper else 15
+                }
+        
+        return None
     
     def detect_format(self, df: pd.DataFrame) -> str:
         """Detect if it's MS or GS trade format"""
@@ -225,16 +283,26 @@ class TradeParser:
                 else:
                     continue
                 
-                # Get mapping
-                mapping = self.normalized_mappings.get(symbol)
-                if not mapping:
-                    logger.warning(f"No mapping found for symbol: {symbol}")
-                    self.unmapped_symbols.append({
-                        'symbol': symbol,
-                        'expiry': expiry,
-                        'position_lots': position_lots
-                    })
-                    continue
+                # Check for special index ticker rules first
+                special_mapping = self._get_index_ticker(symbol, security_type)
+                
+                if special_mapping:
+                    # Use special index rules
+                    mapping = special_mapping
+                    mapping['original_symbol'] = symbol
+                    # Override lot size with the one from trade file if available
+                    mapping['lot_size'] = lot_size
+                else:
+                    # Get regular mapping from file
+                    mapping = self.normalized_mappings.get(symbol)
+                    if not mapping:
+                        logger.warning(f"No mapping found for symbol: {symbol}")
+                        self.unmapped_symbols.append({
+                            'symbol': symbol,
+                            'expiry': expiry,
+                            'position_lots': position_lots
+                        })
+                        continue
                 
                 # Generate Bloomberg ticker
                 bloomberg_ticker = self._generate_bloomberg_ticker(
@@ -293,6 +361,7 @@ class TradeParser:
             '%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d',
             '%d/%m/%y', '%d-%m-%y', '%d.%m.%y',
             '%m/%d/%y', '%m-%d-%y', '%m.%d.%y',
+            '%d-%b-%Y', '%d-%b-%y',  # Added for formats like 26-Sep-2025
         ]
         
         for fmt in formats:
@@ -313,8 +382,8 @@ class TradeParser:
         """Generate Bloomberg ticker format"""
         ticker_upper = ticker.upper()
         
-        # Check if this is an index
-        if is_index or ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY']:
+        # Check if this is an index based on ticker or flag
+        if is_index or ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'NSEBANK', 'AF1']:
             is_index = True
         
         if security_type == 'Futures':
@@ -326,6 +395,7 @@ class TradeParser:
             else:
                 return f"{ticker}={month_code}{year_code} IS Equity"
         else:
+            # Options format
             date_str = expiry.strftime('%m/%d/%y')
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
             
